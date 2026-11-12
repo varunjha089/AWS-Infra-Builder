@@ -8,7 +8,7 @@ It is NN Builder's idea applied to cloud networks. NN Builder's checker catches 
 on the GPU. This app does the same for a wrong CIDR, a private subnet with no way out, or a database open to the internet,
 catching them at design time instead of after `terraform apply` or a security incident.
 
-Status: idea only (12 November 2026). Nothing is built yet.
+Status: phase 0 built (12 November 2026): the canvas, the CIDR and routing checks, the `.aib` text and templates. See README.md and CLAUDE.md.
 
 ---
 
