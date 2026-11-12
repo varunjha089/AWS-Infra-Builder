@@ -51,6 +51,41 @@ pub struct RouteTableInfo {
     pub routes: Vec<RouteInfo>,
 }
 
+/// one permission of a security group: a protocol and port range from (or to) address ranges and groups
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PermInfo {
+    /// "tcp", "udp", "icmp" or "-1"
+    pub proto: String,
+    pub from: i32,
+    pub to: i32,
+    pub cidrs: Vec<String>,
+    pub groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SgInfo {
+    pub id: String,
+    pub name: Option<String>,
+    pub group_name: String,
+    pub description: String,
+    pub ingress: Vec<PermInfo>,
+    pub egress: Vec<PermInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstanceInfo {
+    pub id: String,
+    pub name: Option<String>,
+    pub instance_type: String,
+    pub subnet_id: String,
+    pub sgs: Vec<String>,
+    pub public_ip: bool,
+    pub key: Option<String>,
+    pub state: String,
+    /// the AMI's name, to guess the OS
+    pub image_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Inventory {
     pub region: String,
@@ -60,6 +95,10 @@ pub struct Inventory {
     pub igws: Vec<(String, Option<String>)>,
     pub nats: Vec<NatInfo>,
     pub route_tables: Vec<RouteTableInfo>,
+    #[serde(default)]
+    pub sgs: Vec<SgInfo>,
+    #[serde(default)]
+    pub instances: Vec<InstanceInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -170,10 +209,90 @@ pub fn to_design(inv: &Inventory) -> Imported {
             }
         }
     }
+    // security groups: the group, then its permissions as traffic arrows (address ranges become cidr blocks, one per range)
+    let mut sg_node: HashMap<String, String> = HashMap::new();
+    for g in &inv.sgs {
+        let nid = id();
+        sg_node.insert(g.id.clone(), nid.clone());
+        let egress_all = g.egress.len() == 1 && g.egress[0].proto == "-1" && g.egress[0].cidrs.iter().any(|c| c == "0.0.0.0/0") && g.egress[0].groups.is_empty();
+        let want = if g.group_name == "default" { "default".to_string() } else { g.name.clone().unwrap_or_else(|| g.group_name.clone()) };
+        d.nodes.push(Node { id: nid, kind: "sg".into(), label: unique(label_for(&Some(want), &g.id, "sg")),
+            params: obj(json!({"egress": if egress_all { "all" } else { "rules" }, "description": g.description, "aws_id": g.id})), parent: Some(vpc_id.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+    }
+    let mut cidr_node: HashMap<String, String> = HashMap::new();
+    let mut cidr_block = |d: &mut Design, c: &str, unique: &mut dyn FnMut(String) -> String, id: &mut dyn FnMut() -> String| -> String {
+        if let Some(n) = cidr_node.get(c) {
+            return n.clone();
+        }
+        let nid = id();
+        let want = if c == "0.0.0.0/0" { "internet".to_string() } else { format!("net_{}", c.replace(['.', '/'], "_")) };
+        d.nodes.push(Node { id: nid.clone(), kind: "cidr".into(), label: unique(want), params: obj(json!({"cidr": c})), parent: None, x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+        cidr_node.insert(c.to_string(), nid.clone());
+        nid
+    };
+    let ports_of = |p: &PermInfo| -> (String, String) {
+        match p.proto.as_str() {
+            "-1" => ("all".into(), String::new()),
+            "icmp" | "icmpv6" => ("icmp".into(), String::new()),
+            proto => (proto.to_string(), if p.from <= 0 && p.to >= 65535 { "all".into() } else if p.from == p.to { p.from.to_string() } else { format!("{}-{}", p.from, p.to) }),
+        }
+    };
+    for g in &inv.sgs {
+        let me = sg_node[&g.id].clone();
+        let egress_all = d.node(&me).map(|n| n.params.get("egress").and_then(|v| v.as_str()) == Some("all")).unwrap_or(true);
+        let mut push = |d: &mut Design, src: String, tgt: String, p: &PermInfo| {
+            let (proto, ports) = ports_of(p);
+            d.edges.push(Edge { id: format!("e{en}"), source: src, target: tgt, kind: "traffic".into(), params: obj(json!({"proto": proto, "ports": ports})) });
+            en += 1;
+        };
+        for p in &g.ingress {
+            for c in &p.cidrs {
+                let src = cidr_block(&mut d, c, &mut unique, &mut id);
+                push(&mut d, src, me.clone(), p);
+            }
+            for other in &p.groups {
+                match sg_node.get(other) {
+                    Some(src) => push(&mut d, src.clone(), me.clone(), p),
+                    None => notes.push(format!("{}: a rule references group {other}, which is not in this VPC; left out.", g.group_name)),
+                }
+            }
+        }
+        if !egress_all {
+            for p in &g.egress {
+                for c in &p.cidrs {
+                    let tgt = cidr_block(&mut d, c, &mut unique, &mut id);
+                    push(&mut d, me.clone(), tgt, p);
+                }
+                for other in &p.groups {
+                    if let Some(tgt) = sg_node.get(other) {
+                        push(&mut d, me.clone(), tgt.clone(), p);
+                    }
+                }
+            }
+        }
+    }
+    // instances (running or stopped; terminated ones are gone)
+    for i in inv.instances.iter().filter(|i| i.state != "terminated" && i.state != "shutting-down") {
+        let Some(parent) = subnet_node.get(&i.subnet_id) else { notes.push(format!("Instance {} is in a subnet the VPC does not list; left out.", i.id)); continue };
+        let known = crate::model::instance_type(&i.instance_type).is_some();
+        if !known {
+            notes.push(format!("Instance {}: type {} is not in the app's table; its cost is shown as 0 until the table knows it.", i.name.clone().unwrap_or(i.id.clone()), i.instance_type));
+        }
+        let image = i.image_name.clone().unwrap_or_default().to_lowercase();
+        let os = if image.contains("ubuntu") { "ubuntu" } else if image.contains("debian") { "debian" } else { "al2023" };
+        let sgs: Vec<String> = i.sgs.iter().filter_map(|g| sg_node.get(g).cloned()).collect();
+        let nid = id();
+        d.nodes.push(Node { id: nid, kind: "ec2".into(), label: unique(label_for(&i.name, &i.id, "instance")),
+            params: obj(json!({"type": i.instance_type, "os": os, "key": i.key.clone().unwrap_or_default(), "public_ip": i.public_ip, "sgs": sgs, "aws_id": i.id, "state": i.state})),
+            parent: Some(parent.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+        if i.state == "stopped" {
+            notes.push(format!("Instance {} is stopped: it costs only its volume and public address until started.", i.name.clone().unwrap_or(i.id.clone())));
+        }
+    }
     arrange(&mut d);
     crate::dsl::sync(&mut d);
-    notes.insert(0, format!("Imported read-only from account {} in {}: {} subnets, {} Internet Gateway{}, {} NAT Gateway{}, {} route tables. Nothing in the account was changed.",
-        inv.account, inv.region, inv.subnets.len(), inv.igws.len(), if inv.igws.len() == 1 { "" } else { "s" }, inv.nats.len(), if inv.nats.len() == 1 { "" } else { "s" }, inv.route_tables.len()));
+    notes.insert(0, format!("Imported read-only from account {} in {}: {} subnets, {} Internet Gateway{}, {} NAT Gateway{}, {} route tables, {} security groups, {} instances. Nothing in the account was changed.",
+        inv.account, inv.region, inv.subnets.len(), inv.igws.len(), if inv.igws.len() == 1 { "" } else { "s" }, inv.nats.len(), if inv.nats.len() == 1 { "" } else { "s" }, inv.route_tables.len(), inv.sgs.len(), inv.instances.len()));
     Imported { design: d, notes }
 }
 
@@ -200,6 +319,19 @@ mod tests {
             igws: vec![("igw-9".into(), None)],
             nats: vec![NatInfo { id: "nat-7".into(), name: Some("nat a".into()), subnet_id: "subnet-1".into(), state: "available".into() },
                        NatInfo { id: "nat-8".into(), name: None, subnet_id: "subnet-2".into(), state: "deleted".into() }],
+            sgs: vec![
+                SgInfo { id: "sg-web".into(), name: Some("web".into()), group_name: "prod-web".into(), description: "web".into(),
+                    ingress: vec![PermInfo { proto: "tcp".into(), from: 443, to: 443, cidrs: vec!["0.0.0.0/0".into()], groups: vec![] }, PermInfo { proto: "tcp".into(), from: 22, to: 22, cidrs: vec!["203.0.113.0/24".into()], groups: vec![] }],
+                    egress: vec![PermInfo { proto: "-1".into(), from: 0, to: 0, cidrs: vec!["0.0.0.0/0".into()], groups: vec![] }] },
+                SgInfo { id: "sg-db".into(), name: None, group_name: "prod-db".into(), description: String::new(),
+                    ingress: vec![PermInfo { proto: "tcp".into(), from: 5432, to: 5432, cidrs: vec![], groups: vec!["sg-web".into(), "sg-gone".into()] }],
+                    egress: vec![PermInfo { proto: "tcp".into(), from: 443, to: 443, cidrs: vec!["0.0.0.0/0".into()], groups: vec![] }] },
+            ],
+            instances: vec![
+                InstanceInfo { id: "i-1".into(), name: Some("web 1".into()), instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec!["sg-web".into()], public_ip: true, key: Some("lab".into()), state: "running".into(), image_name: Some("ubuntu/images/hvm-ssd/ubuntu-jammy".into()) },
+                InstanceInfo { id: "i-2".into(), name: None, instance_type: "x9.odd".into(), subnet_id: "subnet-3".into(), sgs: vec!["sg-db".into()], public_ip: false, key: None, state: "stopped".into(), image_name: None },
+                InstanceInfo { id: "i-3".into(), name: None, instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec![], public_ip: false, key: None, state: "terminated".into(), image_name: None },
+            ],
             route_tables: vec![
                 RouteTableInfo { id: "rtb-main".into(), name: None, main: true, subnet_ids: vec![], routes: vec![RouteInfo { dest: "10.0.0.0/16".into(), target: "local".into(), state: "active".into() }] },
                 RouteTableInfo { id: "rtb-pub".into(), name: Some("public".into()), main: false, subnet_ids: vec!["subnet-1".into(), "subnet-2".into()],
@@ -232,8 +364,26 @@ mod tests {
         assert!(im.notes.iter().any(|n| n.contains("pcx-1")));
         assert!(im.notes.iter().any(|n| n.contains("main table")));
         assert!(im.notes[0].contains("123456789012"));
+        // security groups and instances
+        assert_eq!(d.by_label("web").unwrap().params["egress"], "all");
+        assert_eq!(d.by_label("prod_db").unwrap().params["egress"], "rules");
+        assert!(d.by_label("internet").is_some() && d.by_label("net_203_0_113_0_24").is_some());
+        let traffic: Vec<_> = d.edges.iter().filter(|e| e.kind == "traffic").collect();
+        assert_eq!(traffic.len(), 4, "443 + ssh in to web, web -> db 5432, db out 443: {traffic:?}");
+        assert!(im.notes.iter().any(|n| n.contains("sg-gone")));
+        let web1 = d.by_label("web_1").unwrap();
+        assert_eq!(web1.params["os"], "ubuntu");
+        assert_eq!(web1.params["public_ip"], true);
+        assert_eq!(web1.params["key"], "lab");
+        assert_eq!(web1.params["sgs"].as_array().unwrap().len(), 1);
+        assert_eq!(d.nodes.iter().filter(|n| n.kind == "ec2").count(), 2, "the terminated one is gone");
+        assert!(im.notes.iter().any(|n| n.contains("x9.odd")));
+        assert!(im.notes.iter().any(|n| n.contains("is stopped")));
+        assert!(d.text.as_ref().unwrap().contains("rule internet -> web tcp 443"), "{}", d.text.as_ref().unwrap());
         let a = analyse(d);
-        assert!(a.ok, "{:?}", a.problems);
+        // the unknown type is an error on its block; everything else is fine
+        assert_eq!(a.errors, 1, "{:?}", a.problems);
+        assert!(a.problems.iter().any(|p| p.contains("x9.odd")));
         assert!(d.text.as_ref().unwrap().contains("subnet public_a public 10.0.0.0/20 az a in prod_vpc rt public"), "{}", d.text.as_ref().unwrap());
         assert_eq!(d.by_label("prod_vpc").unwrap().params["aws_id"], "vpc-0abc");
     }

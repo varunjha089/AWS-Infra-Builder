@@ -2,7 +2,7 @@
 //! profile in ~/.aws (the SDK reads the files and handles SSO) or from the keys pasted into the app (handed to the SDK for one
 //! call at a time; they live in the keychain, see main.rs). Only Describe* and GetCallerIdentity are ever called here.
 
-use aib_core::import::{Inventory, NatInfo, RouteInfo, RouteTableInfo, SubnetInfo, VpcInfo};
+use aib_core::import::{InstanceInfo, Inventory, NatInfo, PermInfo, RouteInfo, RouteTableInfo, SgInfo, SubnetInfo, VpcInfo};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_ec2::types::Filter;
 use serde::Serialize;
@@ -118,7 +118,36 @@ pub async fn inventory(creds: Creds, region: &str, vpc_id: &str, account: &str) 
                 Some(RouteInfo { dest, target, state: ro.state().map(|s| s.as_str().to_string()).unwrap_or_default() })
             }).collect(),
         }).collect();
-        Ok(Inventory { region: region.into(), account: account.into(), vpc, subnets, igws, nats, route_tables })
+        let perm = |p: &aws_sdk_ec2::types::IpPermission| PermInfo {
+            proto: p.ip_protocol().unwrap_or("-1").to_string(),
+            from: p.from_port().unwrap_or(0),
+            to: p.to_port().unwrap_or(0),
+            cidrs: p.ip_ranges().iter().filter_map(|r| r.cidr_ip()).map(String::from).collect(),
+            groups: p.user_id_group_pairs().iter().filter_map(|g| g.group_id()).map(String::from).collect(),
+        };
+        let sgs = ec2.describe_security_groups().filters(by_vpc("vpc-id")).send().await.map_err(readable)?;
+        let sgs = sgs.security_groups().iter().map(|g| SgInfo {
+            id: g.group_id().unwrap_or("").into(), name: name_tag(g.tags()), group_name: g.group_name().unwrap_or("").into(), description: g.description().unwrap_or("").into(),
+            ingress: g.ip_permissions().iter().map(perm).collect(), egress: g.ip_permissions_egress().iter().map(perm).collect(),
+        }).collect();
+        let res = ec2.describe_instances().filters(by_vpc("vpc-id")).send().await.map_err(readable)?;
+        let mut instances: Vec<InstanceInfo> = res.reservations().iter().flat_map(|r| r.instances().iter()).map(|i| InstanceInfo {
+            id: i.instance_id().unwrap_or("").into(), name: name_tag(i.tags()), instance_type: i.instance_type().map(|t| t.as_str().to_string()).unwrap_or_default(),
+            subnet_id: i.subnet_id().unwrap_or("").into(), sgs: i.security_groups().iter().filter_map(|g| g.group_id()).map(String::from).collect(),
+            public_ip: i.public_ip_address().is_some(), key: i.key_name().map(String::from), state: i.state().and_then(|s| s.name()).map(|n| n.as_str().to_string()).unwrap_or_default(),
+            image_name: i.image_id().map(String::from),
+        }).collect();
+        // the AMI names, to guess each instance's OS (one call for all)
+        let image_ids: Vec<String> = instances.iter().filter_map(|i| i.image_name.clone()).collect();
+        if !image_ids.is_empty() {
+            if let Ok(imgs) = ec2.describe_images().set_image_ids(Some(image_ids)).send().await {
+                for inst in instances.iter_mut() {
+                    let name = imgs.images().iter().find(|im| im.image_id() == inst.image_name.as_deref()).and_then(|im| im.name()).map(String::from);
+                    inst.image_name = name;
+                }
+            }
+        }
+        Ok(Inventory { region: region.into(), account: account.into(), vpc, subnets, igws, nats, route_tables, sgs, instances })
     }).await
 }
 
