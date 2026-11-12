@@ -8,19 +8,26 @@ import {
 import "@xyflow/react/dist/style.css";
 import { api, errText, type Analysis, type AppState, type DNode, type Design, type EdgeResult, type Loaded, type NodeResult } from "./api";
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
+import { neon, useTheme } from "./theme";
 
 export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569" };
 const CONTAINER = (kind: string) => kind === "vpc" || kind === "subnet";
 
 type Data = { node: DNode; result?: NodeResult; azName: string };
 
-function color(n: DNode): string {
+function baseColor(n: DNode): string {
   return n.kind === "subnet" ? COLORS[String(n.params.tier)] ?? COLORS.subnet : COLORS[n.kind] ?? "#999";
+}
+/** a block's colour: as defined by day, its neon version at night */
+function useColor(): (n: DNode) => string {
+  const night = useTheme() === "night";
+  return (n: DNode) => (night ? neon(baseColor(n)) : baseColor(n));
 }
 const mark = (st?: string) => (st === "error" ? " ✕" : st === "warn" ? " ⚠" : "");
 
 function BoxNode({ data, selected }: NodeProps<Node<Data>>) {
   const { node: n, result: r } = data;
+  const color = useColor();
   const st = r?.status ?? "ok";
   const isVpc = n.kind === "vpc";
   return (
@@ -39,6 +46,7 @@ function BoxNode({ data, selected }: NodeProps<Node<Data>>) {
 
 function BlockNode({ data, selected }: NodeProps<Node<Data>>) {
   const { node: n, result: r } = data;
+  const color = useColor();
   const st = r?.status ?? "ok";
   return (
     <div className={`block st-${st} ${selected ? "sel" : ""}`} style={{ "--c": color(n) } as CSSProperties}>
@@ -107,6 +115,9 @@ export function DesignTab(p: Props) {
 
 function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelectId, signal }: Props) {
   const rf = useReactFlow();
+  const color = useColor();
+  const night = useTheme() === "night";
+  const pal = (kind: string) => ({ borderColor: night ? neon(COLORS[kind]) : COLORS[kind], "--c": night ? neon(COLORS[kind]) : COLORS[kind] } as CSSProperties);
   const [nodes, setNodes] = useState<Node<Data>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selEdge, setSelEdge] = useState<string | null>(null);
@@ -218,22 +229,22 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
     <div className="design">
       <aside className="palette">
         <h4>Scope</h4>
-        <button className="pal" style={{ borderColor: COLORS.vpc }} onClick={() => add("vpc")}>VPC<small>a private network in the region</small></button>
+        <button className="pal" style={pal("vpc")} onClick={() => add("vpc")}>VPC<small>a private network in the region</small></button>
         <h4>Network</h4>
-        <button className="pal" style={{ borderColor: COLORS.subnet }} onClick={() => add("subnet")}>Subnet<small>public, private or isolated, in one AZ</small></button>
-        <button className="pal" style={{ borderColor: COLORS.igw }} onClick={() => add("igw")}>Internet Gateway<small>one per VPC</small></button>
-        <button className="pal" style={{ borderColor: COLORS.nat }} onClick={() => add("nat")}>NAT Gateway<small>in a public subnet, ≈ USD 32 / month</small></button>
-        <button className="pal" style={{ borderColor: COLORS.rt }} onClick={() => add("rt")}>Route table<small>subnet → table → gateway</small></button>
+        <button className="pal" style={pal("subnet")} onClick={() => add("subnet")}>Subnet<small>public, private or isolated, in one AZ</small></button>
+        <button className="pal" style={pal("igw")} onClick={() => add("igw")}>Internet Gateway<small>one per VPC</small></button>
+        <button className="pal" style={pal("nat")} onClick={() => add("nat")}>NAT Gateway<small>in a public subnet, ≈ USD 32 / month</small></button>
+        <button className="pal" style={pal("rt")} onClick={() => add("rt")}>Route table<small>subnet → table → gateway</small></button>
         <h4>Security</h4>
-        <button className="pal" style={{ borderColor: COLORS.sg }} onClick={() => add("sg")}>Security group<small>arrows between groups = allowed traffic</small></button>
-        <button className="pal" style={{ borderColor: COLORS.cidr }} onClick={() => add("cidr")}>Address range<small>the internet, your office IP</small></button>
+        <button className="pal" style={pal("sg")} onClick={() => add("sg")}>Security group<small>arrows between groups = allowed traffic</small></button>
+        <button className="pal" style={pal("cidr")} onClick={() => add("cidr")}>Address range<small>the internet, your office IP</small></button>
         <h4>Compute</h4>
-        <button className="pal" style={{ borderColor: COLORS.ec2 }} onClick={() => add("ec2")}>EC2 instance<small>cheapest type by default, no public IP</small></button>
+        <button className="pal" style={pal("ec2")} onClick={() => add("ec2")}>EC2 instance<small>cheapest type by default, no public IP</small></button>
         <h4>Arrows</h4>
         <p className="small muted" style={{ margin: "4px 0" }}>Subnet → route table: the subnet uses it. Route table → gateway: a route. Group or range → group: the target lets that traffic in (ports in the inspector).</p>
         <h4>Layout</h4>
-        <button className="pal" style={{ borderColor: "#999" }} onClick={() => api.designArrange(design).then(apply).then(() => window.setTimeout(() => rf.fitView({ padding: 0.15, duration: 300 }), 60)).catch((e) => toast(errText(e)))}>Arrange<small>AZ columns × tier rows (⇧⌘A)</small></button>
-        <button className="pal" style={{ borderColor: "#999" }} onClick={() => rf.fitView({ padding: 0.15, duration: 300 })}>Fit to window<small>⇧⌘F</small></button>
+        <button className="pal" style={pal("rt")} onClick={() => api.designArrange(design).then(apply).then(() => window.setTimeout(() => rf.fitView({ padding: 0.15, duration: 300 }), 60)).catch((e) => toast(errText(e)))}>Arrange<small>AZ columns × tier rows (⇧⌘A)</small></button>
+        <button className="pal" style={pal("rt")} onClick={() => rf.fitView({ padding: 0.15, duration: 300 })}>Fit to window<small>⇧⌘F</small></button>
       </aside>
       <div className="canvas">
         {design.nodes.length === 0 && <div className="msg info big-hint">Empty design: add a VPC from the palette, then subnets, an Internet Gateway and a route table. Or open a template from the Projects page.</div>}
@@ -243,13 +254,13 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
           onPaneClick={() => { setSelectId(null); setSelEdge(null); }}>
           <Background gap={18} />
           <Controls />
-          <MiniMap pannable zoomable nodeColor={(n) => color((n.data as Data).node)} />
+          <MiniMap pannable zoomable nodeColor={(n) => color((n.data as Data).node)} maskColor={night ? "rgba(5,6,12,.7)" : undefined} />
         </ReactFlow>
       </div>
       <aside className="inspector">
         {selected && result ? (
           <>
-            <h3 style={{ color: color(selected) }}>{result.title}{mark(result.status)}</h3>
+            <h3 style={{ color: color(selected), "--c": color(selected) } as CSSProperties}>{result.title}{mark(result.status)}</h3>
             <div className="fields">
               <label>Name (in the text)<input value={selected.label} onChange={(e) => setLabel(selected.id, e.target.value)} /></label>
               {selected.kind === "vpc" && <label>CIDR<input value={String(selected.params.cidr ?? "")} onChange={(e) => setParam(selected.id, "cidr", e.target.value)} placeholder="10.0.0.0/16" /></label>}

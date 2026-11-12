@@ -240,8 +240,12 @@ pub fn to_design(inv: &Inventory) -> Imported {
     for g in &inv.sgs {
         let me = sg_node[&g.id].clone();
         let egress_all = d.node(&me).map(|n| n.params.get("egress").and_then(|v| v.as_str()) == Some("all")).unwrap_or(true);
+        // one arrow stands for both ends of a rule: an egress permission that mirrors an ingress one already drawn is not drawn again
         let mut push = |d: &mut Design, src: String, tgt: String, p: &PermInfo| {
             let (proto, ports) = ports_of(p);
+            if d.edges.iter().any(|e| e.kind == "traffic" && e.source == src && e.target == tgt && e.params.get("proto").and_then(|v| v.as_str()) == Some(&proto) && e.params.get("ports").and_then(|v| v.as_str()) == Some(&ports)) {
+                return;
+            }
             d.edges.push(Edge { id: format!("e{en}"), source: src, target: tgt, kind: "traffic".into(), params: obj(json!({"proto": proto, "ports": ports})) });
             en += 1;
         };
@@ -326,6 +330,12 @@ mod tests {
                 SgInfo { id: "sg-db".into(), name: None, group_name: "prod-db".into(), description: String::new(),
                     ingress: vec![PermInfo { proto: "tcp".into(), from: 5432, to: 5432, cidrs: vec![], groups: vec!["sg-web".into(), "sg-gone".into()] }],
                     egress: vec![PermInfo { proto: "tcp".into(), from: 443, to: 443, cidrs: vec!["0.0.0.0/0".into()], groups: vec![] }] },
+                // a pair of groups whose egress and ingress mirror each other: drawn once
+                SgInfo { id: "sg-out".into(), name: None, group_name: "nfs-out".into(), description: String::new(), ingress: vec![],
+                    egress: vec![PermInfo { proto: "tcp".into(), from: 2049, to: 2049, cidrs: vec![], groups: vec!["sg-in".into()] }] },
+                SgInfo { id: "sg-in".into(), name: None, group_name: "nfs-in".into(), description: String::new(),
+                    ingress: vec![PermInfo { proto: "tcp".into(), from: 2049, to: 2049, cidrs: vec![], groups: vec!["sg-out".into()] }],
+                    egress: vec![PermInfo { proto: "-1".into(), from: 0, to: 0, cidrs: vec!["0.0.0.0/0".into()], groups: vec![] }] },
             ],
             instances: vec![
                 InstanceInfo { id: "i-1".into(), name: Some("web 1".into()), instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec!["sg-web".into()], public_ip: true, key: Some("lab".into()), state: "running".into(), image_name: Some("ubuntu/images/hvm-ssd/ubuntu-jammy".into()) },
@@ -369,7 +379,7 @@ mod tests {
         assert_eq!(d.by_label("prod_db").unwrap().params["egress"], "rules");
         assert!(d.by_label("internet").is_some() && d.by_label("net_203_0_113_0_24").is_some());
         let traffic: Vec<_> = d.edges.iter().filter(|e| e.kind == "traffic").collect();
-        assert_eq!(traffic.len(), 4, "443 + ssh in to web, web -> db 5432, db out 443: {traffic:?}");
+        assert_eq!(traffic.len(), 5, "443 + ssh in to web, web -> db 5432, db out 443, nfs-out -> nfs-in once: {traffic:?}");
         assert!(im.notes.iter().any(|n| n.contains("sg-gone")));
         let web1 = d.by_label("web_1").unwrap();
         assert_eq!(web1.params["os"], "ubuntu");
