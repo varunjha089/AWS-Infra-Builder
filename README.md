@@ -8,8 +8,9 @@ Terraform shows the whole text but not the picture, and mistakes appear only at 
 wrong CIDR, a private subnet with no way out, or a NAT Gateway in the wrong subnet at design time, on the block itself, in plain
 words, with what to change.
 
-**Version 0.2.0: networking on the canvas and in text, costs, and a read-only look at your account.** The app only ever reads from AWS
-(`sts:GetCallerIdentity`, `ec2:Describe*`); nothing is created, changed or deleted.
+**Version 0.3.0: networking, security groups and instances on the canvas and in text; OpenTofu/Terraform code; costs; a read-only look at
+your account; neon night mode.** The app only ever reads from AWS (`sts:GetCallerIdentity`, `ec2:Describe*`); nothing is created, changed or
+deleted. To build what you drew, export the code and run `tofu plan` / `tofu apply` yourself (Apply from the app comes in the next phase).
 
 ## What it does now
 
@@ -21,6 +22,13 @@ words, with what to change.
   isolated one nowhere; a NAT Gateway must be in a public subnet; a private subnet whose NAT is in another AZ gets a warning; one
   Internet Gateway per VPC; a region's AZ count; routes inside the VPC's own range; duplicate names. Red means AWS would refuse it
   or the design contradicts itself; yellow means it works but is probably not what you want.
+- **Security groups and instances:** a security group is a block; an arrow from a group or an address range (the internet, your office IP)
+  to a group is the traffic it lets in, labelled with the ports (`tcp 5432 (postgres)`). An instance lives in a subnet, with its type and
+  monthly price, OS, key pair, public address and groups. Checks: SSH, RDP or a database port open to the whole internet, groups nobody
+  uses or nothing can reach, a public IP in a private tier, SSH allowed without a key pair, an instance without a group.
+- **Code tab:** the design as `main.tf`, `variables.tf` and `outputs.tf` for the AWS provider, one resource per block with a comment naming
+  the block and the tags `managed-by = aws-infra-builder`, `project`, `design-block`. Copy or export; every template's code passes
+  `tofu validate` (checked in CI).
 - **Text tab:** the same design as `.aib` text, one line per block, kept in step both ways:
 
   ```text
@@ -35,19 +43,28 @@ words, with what to change.
   nat nat_a in public_a
   rt public in main: 0.0.0.0/0 -> igw
   rt app_a_rt in main: 0.0.0.0/0 -> nat_a
+  ec2 web_1 t4g.micro in public_a sg web key my_key public
+  sg web in main
+
+  cidr internet 0.0.0.0/0
+
+  rule internet -> web tcp 443
   ```
 
-- **Costs, with the cheapest option first:** every block that costs money while idle shows its monthly price (a NAT Gateway is about
-  USD 41 a month in Mumbai, USD 33 in Virginia); the Costs tab adds them up and says how to pay less: one shared NAT instead of one per AZ
-  and what that costs in reliability, an unused NAT, VPC endpoints instead of a NAT, tearing down at night. VPCs, subnets, gateways and
-  route tables are free, so a network costs nothing until something that runs is added.
+- **Costs, with the cheapest option first:** every block that costs money shows its monthly price (a NAT Gateway is about USD 41 a month
+  in Mumbai, USD 33 in Virginia; a t4g.micro about USD 7; a public IPv4 address USD 3.65); the cheapest instance type is the default; the
+  Costs tab adds everything up and says how to pay less: one shared NAT instead of one per AZ and what that costs in reliability, an unused
+  NAT, VPC endpoints instead of a NAT, Graviton instead of x86, stopping instances outside working hours, dropping public addresses. VPCs,
+  subnets, gateways, route tables and security groups are free, so a network costs nothing until something that runs is added.
 - **Connection:** the credentials come from a profile in `~/.aws/config` / `~/.aws/credentials` (SSO profiles work after `aws sso login`)
   or from keys pasted into the app, which go into the system keychain and are handed to the AWS SDK one call at a time. "Test connection"
   shows the account. The read-only IAM policy to give the key is shown ready to paste.
 - **Account → Import:** list the VPCs in a region and bring one onto the canvas: its subnets in their AZs, tiers worked out from the routes,
-  NAT Gateways in their subnets, route tables with their routes, and the monthly cost it already incurs. Read-only; the project remembers
-  which account and region it came from.
-- **Templates:** a single public subnet, a two-tier VPC in 2 AZs, a three-tier VPC with a shared NAT, and "Spot the mistakes".
+  NAT Gateways in their subnets, route tables with their routes, security groups with their rules as arrows, instances in their subnets,
+  and the monthly cost it already incurs. Read-only; the project remembers which account and region it came from.
+- **Templates:** a single public subnet, one web server (the cheapest thing that serves a website), a two-tier VPC in 2 AZs, a three-tier
+  VPC with a shared NAT, and "Spot the mistakes".
+- **Night mode** (⇧⌘N) is neon: dark panels, glowing outlines, each kind of block in its own colour.
 - **Projects:** a folder with `project.json` and `design.json`, wherever you choose. A template opens unsaved until you save it.
 
 ## Roadmap
@@ -55,7 +72,7 @@ words, with what to change.
 | Phase | Contents |
 |---|---|
 | 0 (done) | canvas, CIDR and routing checks, `.aib` text, templates; plus credentials, costs and VPC import pulled forward |
-| 1 | security groups as traffic arrows, EC2, Terraform/OpenTofu HCL generation, `tofu validate` in CI |
+| 1 (done) | security groups as traffic arrows, EC2, Terraform/OpenTofu HCL generation, `tofu validate` in CI |
 | 2 | plan / apply / destroy with a bundled OpenTofu, the plan drawn on the canvas, state backups, account guard |
 | 3 | ALB, Auto Scaling, RDS, S3, VPC endpoints; reachability questions; cost estimates |
 | 4 | drift check, least-privilege deploy policy generated from the design, budget guard |
@@ -67,6 +84,7 @@ Rust (stable), Node 20+, and the Tauri 2 prerequisites for your system.
 ```sh
 cd web && npm ci && npm run build && cd ..
 cargo test -p aib-core
+cargo test -p aib-core -- --ignored every_template_validates   # tofu init + validate on every template (needs OpenTofu and the internet)
 cd app && npm ci && npx tauri build          # the bundle lands in target/release/bundle/
 ```
 
