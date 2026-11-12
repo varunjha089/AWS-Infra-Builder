@@ -1,10 +1,14 @@
-//! AWS Infra Builder core: the design (blocks inside blocks, arrows between them), CIDR arithmetic, the checks, the .aib text
-//! language, templates and project files. No UI and no AWS calls: the design computer designs; AWS is touched only on an explicit
-//! Apply (later phases).
+//! AWS Infra Builder core: the design (blocks inside blocks, arrows between them), CIDR arithmetic, the checks, cost estimates, the
+//! .aib text language, templates, project files, the credential sources and the import mapping. No UI and no AWS calls: the app
+//! makes the (read-only) calls and hands the result here. The design computer designs; AWS is changed only on an explicit Apply
+//! (later phases).
 
 pub mod checks;
 pub mod cidr;
+pub mod creds;
 pub mod dsl;
+pub mod import;
 pub mod model;
+pub mod pricing;
 pub mod store;
 pub mod templates;

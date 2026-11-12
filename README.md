@@ -8,7 +8,8 @@ Terraform shows the whole text but not the picture, and mistakes appear only at 
 wrong CIDR, a private subnet with no way out, or a NAT Gateway in the wrong subnet at design time, on the block itself, in plain
 words, with what to change.
 
-**Version 0.1.0 (phase 0): networking on the canvas and in text.** Nothing in this version talks to AWS.
+**Version 0.2.0: networking on the canvas and in text, costs, and a read-only look at your account.** The app only ever reads from AWS
+(`sts:GetCallerIdentity`, `ec2:Describe*`); nothing is created, changed or deleted.
 
 ## What it does now
 
@@ -36,6 +37,16 @@ words, with what to change.
   rt app_a_rt in main: 0.0.0.0/0 -> nat_a
   ```
 
+- **Costs, with the cheapest option first:** every block that costs money while idle shows its monthly price (a NAT Gateway is about
+  USD 41 a month in Mumbai, USD 33 in Virginia); the Costs tab adds them up and says how to pay less: one shared NAT instead of one per AZ
+  and what that costs in reliability, an unused NAT, VPC endpoints instead of a NAT, tearing down at night. VPCs, subnets, gateways and
+  route tables are free, so a network costs nothing until something that runs is added.
+- **Connection:** the credentials come from a profile in `~/.aws/config` / `~/.aws/credentials` (SSO profiles work after `aws sso login`)
+  or from keys pasted into the app, which go into the system keychain and are handed to the AWS SDK one call at a time. "Test connection"
+  shows the account. The read-only IAM policy to give the key is shown ready to paste.
+- **Account → Import:** list the VPCs in a region and bring one onto the canvas: its subnets in their AZs, tiers worked out from the routes,
+  NAT Gateways in their subnets, route tables with their routes, and the monthly cost it already incurs. Read-only; the project remembers
+  which account and region it came from.
 - **Templates:** a single public subnet, a two-tier VPC in 2 AZs, a three-tier VPC with a shared NAT, and "Spot the mistakes".
 - **Projects:** a folder with `project.json` and `design.json`, wherever you choose. A template opens unsaved until you save it.
 
@@ -43,11 +54,11 @@ words, with what to change.
 
 | Phase | Contents |
 |---|---|
-| 0 (this) | canvas, CIDR and routing checks, `.aib` text, templates |
+| 0 (done) | canvas, CIDR and routing checks, `.aib` text, templates; plus credentials, costs and VPC import pulled forward |
 | 1 | security groups as traffic arrows, EC2, Terraform/OpenTofu HCL generation, `tofu validate` in CI |
 | 2 | plan / apply / destroy with a bundled OpenTofu, the plan drawn on the canvas, state backups, account guard |
 | 3 | ALB, Auto Scaling, RDS, S3, VPC endpoints; reachability questions; cost estimates |
-| 4 | import an existing VPC, drift check, least-privilege IAM policy generator, budget guard |
+| 4 | drift check, least-privilege deploy policy generated from the design, budget guard |
 
 ## Build
 

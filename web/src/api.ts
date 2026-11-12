@@ -8,10 +8,17 @@ export interface Design { name: string; region: string; azs: number; nodes: DNod
 
 export interface NodeResult { id: string; kind: string; title: string; status: "ok" | "warn" | "error"; messages: string[]; info: string[]; summary: string }
 export interface EdgeResult { id: string; status: "ok" | "warn" | "error"; messages: string[]; label: string }
+export interface CostItem { id: string; label: string; kind: string; monthly: number; note: string }
+export interface CostReport { items: CostItem[]; total: number; advice: string[]; region: string; assumptions: string[] }
 export interface Analysis {
   nodes: NodeResult[]; edges: EdgeResult[]; problems: string[]; ok: boolean; errors: number; warnings: number;
-  counts: Record<string, number>; az_spread: number; az_names: string[];
+  counts: Record<string, number>; az_spread: number; az_names: string[]; cost: CostReport;
 }
+export interface Profile { name: string; kind: string; region: string | null; key_hint: string | null }
+export type Source = { kind: "none" } | { kind: "profile"; name: string } | { kind: "keys" };
+export interface Identity { account: string; arn: string; user_id: string; region: string; checked: number }
+export interface AwsState { profiles: Profile[]; aws_dir: string; source: Source; keys: { hint: string; temporary: boolean } | null; region: string | null; identity: Identity | null; policy: string }
+export interface VpcInfo { id: string; name: string | null; cidr: string; is_default: boolean; subnets: number }
 export interface Loaded { design: Design; analysis: Analysis }
 export interface TextError { line: number; message: string }
 
@@ -43,4 +50,11 @@ export const api = {
   designRemove: (design: Design, nodes: string[], edges: string[]) => invoke<Loaded>("design_remove", { design, nodes, edges }),
   textHelp: () => invoke<[string, string][]>("text_help"),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
+  awsState: () => invoke<AwsState>("aws_state"),
+  awsSetKeys: (id: string, secretKey: string, token: string) => invoke<{ hint: string; temporary: boolean }>("aws_set_keys", { id, secretKey, token }),
+  awsClearKeys: () => invoke<void>("aws_clear_keys"),
+  awsSelect: (source: Source, region?: string) => invoke<void>("aws_select", { source, region: region ?? null }),
+  awsTest: (region?: string) => invoke<Identity>("aws_test", { region: region ?? null }),
+  awsListVpcs: (region?: string) => invoke<{ region: string; vpcs: VpcInfo[] }>("aws_list_vpcs", { region: region ?? null }),
+  awsImport: (vpcId: string, region?: string) => invoke<{ project: ProjectInfo; notes: string[] }>("aws_import", { region: region ?? null, vpcId }),
 };

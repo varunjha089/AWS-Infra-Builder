@@ -4,6 +4,7 @@
 
 use crate::cidr::Cidr;
 use crate::model::{az_letters, edge_kind, parent_kind, region_azs, title, Design, Node, TIERS};
+use crate::pricing::{self, CostReport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -46,6 +47,8 @@ pub struct Analysis {
     pub az_spread: usize,
     /// the region's AZ names for the design's letters
     pub az_names: Vec<String>,
+    /// what the design costs a month while idle, and how to pay less
+    pub cost: CostReport,
 }
 
 struct Ctx {
@@ -248,8 +251,9 @@ pub fn analyse(d: &Design) -> Analysis {
             }
             info.entry(n.id.clone()).or_default().push(format!("In {} ({}{})", s.label, d.region, p(s, "az")));
         }
-        info.entry(n.id.clone()).or_default().push("Needs an Elastic IP (created with it). Costs about USD 32 a month before any traffic.".into());
-        summary.insert(n.id.clone(), "≈ USD 32 / month + data".into());
+        let monthly = pricing::nat_hourly(&d.region) * pricing::HOURS;
+        info.entry(n.id.clone()).or_default().push(format!("Needs an Elastic IP (created with it). Costs about USD {monthly:.0} a month in {} before any traffic, plus USD {} per GB.", d.region, pricing::nat_per_gb(&d.region)));
+        summary.insert(n.id.clone(), format!("≈ USD {monthly:.0} / month + data"));
         if !d.edges.iter().any(|e| e.kind == "route" && e.target == n.id) {
             cx.warn(&n.id, "No route table sends traffic here: the NAT Gateway would cost money and carry nothing. Draw an arrow from a private route table to it.");
         }
@@ -387,7 +391,7 @@ pub fn analyse(d: &Design) -> Analysis {
     let mut azs: Vec<&str> = d.nodes.iter().filter(|n| n.kind == "subnet").map(|n| p(n, "az")).collect();
     azs.sort_unstable();
     azs.dedup();
-    Analysis { nodes, edges: edge_results, problems, ok: errors == 0, errors, warnings, counts, az_spread: azs.len(), az_names }
+    Analysis { nodes, edges: edge_results, problems, ok: errors == 0, errors, warnings, counts, az_spread: azs.len(), az_names, cost: pricing::cost(d) }
 }
 
 #[cfg(test)]

@@ -287,6 +287,8 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
             <h4>Summary</h4>
             <div className="counts">{st.kinds.map((k) => <span key={k.kind} className="pill">{analysis.counts[k.kind] ?? 0} {k.title}{(analysis.counts[k.kind] ?? 0) === 1 ? "" : "s"}</span>)}
               <span className="pill">{analysis.az_spread} AZ{analysis.az_spread === 1 ? "" : "s"} used</span></div>
+            <h4>Cost</h4>
+            <p className="small"><strong>≈ USD {analysis.cost.total.toFixed(2)} a month</strong> while idle (estimate, {analysis.cost.region}). {analysis.cost.advice[0] ?? ""}</p>
             <h4>Problems</h4>
             {analysis.problems.length === 0 ? <p className="st-ok">None: every CIDR fits, every subnet routes as its tier says.</p>
               : <ul className="problems">{analysis.problems.map((m, i) => <li key={i} className={analysis.errors && i < analysis.errors ? "" : ""}>{m}</li>)}</ul>}
