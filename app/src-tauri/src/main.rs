@@ -7,6 +7,7 @@ mod aws;
 use aib_core::checks::{self, Analysis};
 use aib_core::creds::{self, Source};
 use aib_core::dsl;
+use aib_core::hcl;
 use aib_core::import;
 use aib_core::model::{self, Design, INSTANCE_TYPES, KINDS, OS, PORTS, REGIONS, TIERS};
 use aib_core::store::{self, Project};
@@ -210,6 +211,22 @@ fn text_help() -> Vec<(String, String)> {
     dsl::help()
 }
 
+/// the design as HCL files (name -> text), generated afresh from the design the window holds
+#[tauri::command]
+fn code(design: Design) -> hcl::Files {
+    hcl::generate(&design)
+}
+
+/// the project's current design as HCL into a folder the owner picks
+#[tauri::command]
+async fn export_code(app: tauri::AppHandle, st: State<'_, App>) -> R<String> {
+    let d = project(&st)?.design();
+    let Some(dir) = pick_folder(app).await? else { return Err("No folder chosen.".into()) };
+    let dir = PathBuf::from(dir);
+    hcl::write_to(&hcl::generate(&d), &dir).map_err(e)?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 fn open_url(app: tauri::AppHandle, url: String) -> R<()> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -397,6 +414,8 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &item("open-project", "Open Project…", Some("CmdOrCtrl+O"))?,
         &item("save-project", "Save Project…", Some("CmdOrCtrl+S"))?,
         &item("close-project", "Close Project", Some("CmdOrCtrl+W"))?,
+        &tauri::menu::PredefinedMenuItem::separator(app)?,
+        &item("export-code", "Export Code (HCL)…", Some("Shift+CmdOrCtrl+E"))?,
     ])?;
     let edit = Submenu::with_items(app, "Edit", true, &[
         &item("undo", "Undo", Some("CmdOrCtrl+Z"))?,
@@ -410,9 +429,10 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let view = Submenu::with_items(app, "View", true, &[
         &item("tab-design", "Design", Some("CmdOrCtrl+1"))?,
         &item("tab-text", "Text", Some("CmdOrCtrl+2"))?,
-        &item("tab-costs", "Costs", Some("CmdOrCtrl+3"))?,
-        &item("tab-account", "Account", Some("CmdOrCtrl+4"))?,
-        &item("tab-connection", "Connection", Some("CmdOrCtrl+5"))?,
+        &item("tab-code", "Code", Some("CmdOrCtrl+3"))?,
+        &item("tab-costs", "Costs", Some("CmdOrCtrl+4"))?,
+        &item("tab-account", "Account", Some("CmdOrCtrl+5"))?,
+        &item("tab-connection", "Connection", Some("CmdOrCtrl+6"))?,
         &item("tab-project", "Projects", Some("CmdOrCtrl+0"))?,
         &tauri::menu::PredefinedMenuItem::separator(app)?,
         &item("night", "Night Mode", Some("Shift+CmdOrCtrl+N"))?,
@@ -436,7 +456,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 fn on_menu(app: &tauri::AppHandle, id: &str) {
     match id {
-        "tab-design" | "tab-text" | "tab-costs" | "tab-account" | "tab-connection" | "tab-project" => { let _ = app.emit("open-tab", id.trim_start_matches("tab-")); }
+        "tab-design" | "tab-text" | "tab-code" | "tab-costs" | "tab-account" | "tab-connection" | "tab-project" => { let _ = app.emit("open-tab", id.trim_start_matches("tab-")); }
         other => { let _ = app.emit("menu", other); }
     }
 }
@@ -456,7 +476,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             app_state, project_new, project_open, project_from_template, project_save_as, project_close, project_forget, set_projects_dir, pick_folder,
-            project_load, save_design, design_from_text, design_arrange, design_add, design_connect, design_remove, text_help, open_url,
+            project_load, save_design, design_from_text, design_arrange, design_add, design_connect, design_remove, text_help, code, export_code, open_url,
             aws_state, aws_set_keys, aws_clear_keys, aws_select, aws_test, aws_list_vpcs, aws_import
         ])
         .build(tauri::generate_context!())

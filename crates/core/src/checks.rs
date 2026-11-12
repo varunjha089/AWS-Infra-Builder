@@ -138,7 +138,7 @@ pub fn analyse(d: &Design) -> Analysis {
                     cx.warn(&v.id, format!("{c} is public address space. AWS allows it, but instances cannot reach the real owners of those addresses; use 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16 unless you mean it."));
                 }
                 if c.to_string() != p(v, "cidr").trim() {
-                    cx.warn(&v.id, format!("{} is not a network address; it is read as {c}.", p(v, "cidr").trim()));
+                    cx.error(&v.id, format!("{} is not a network address (AWS refuses it); write {c}.", p(v, "cidr").trim()));
                 }
                 info.entry(v.id.clone()).or_default().push(format!("{c}: 2^(32−{}) = {} addresses", c.prefix, c.size()));
                 summary.insert(v.id.clone(), format!("{c} · {} addresses", c.size()));
@@ -185,7 +185,7 @@ pub fn analyse(d: &Design) -> Analysis {
                     cx.error(&s.id, format!("A subnet CIDR must be between /16 and /28 (AWS rule); {c} is /{}.", c.prefix));
                 }
                 if c.to_string() != p(s, "cidr").trim() {
-                    cx.warn(&s.id, format!("{} is not a network address; it is read as {c}.", p(s, "cidr").trim()));
+                    cx.error(&s.id, format!("{} is not a network address (AWS refuses it); write {c}.", p(s, "cidr").trim()));
                 }
                 if let Some(v) = vpc {
                     if let Some(vc) = vpc_cidr.get(&v.id) {

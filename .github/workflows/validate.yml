@@ -1,0 +1,54 @@
+# Tests, clippy, the web build, and `tofu validate` on the HCL of every template. No AWS account is needed: nothing talks to AWS.
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Core tests
+        run: cargo test -p aib-core
+      - name: Clippy (core)
+        run: cargo clippy -p aib-core -- -D warnings
+      - name: Write the templates' HCL
+        run: cargo run -p aib-core --example dump_hcl -- hcl-out
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_wrapper: false
+      - name: tofu validate every template
+        run: |
+          set -e
+          export TF_PLUGIN_CACHE_DIR="$RUNNER_TEMP/plugin-cache"
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          for d in hcl-out/*/; do
+            echo "== $d"
+            (cd "$d" && tofu init -backend=false -input=false -no-color >/dev/null && tofu validate -no-color)
+          done
+      - name: Upload the HCL
+        uses: actions/upload-artifact@v4
+        with:
+          name: templates-hcl
+          path: hcl-out
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web

@@ -6,10 +6,11 @@ import { api, errText, type Analysis, type AppState, type Design, type Loaded } 
 import { DesignTab } from "./Design";
 import { TextTab } from "./TextTab";
 import { CostsTab } from "./CostsTab";
+import { CodeTab } from "./CodeTab";
 import { ConnectionTab } from "./ConnectionTab";
 import { AccountTab } from "./AccountTab";
 
-type Tab = "project" | "design" | "text" | "costs" | "account" | "connection";
+type Tab = "project" | "design" | "text" | "code" | "costs" | "account" | "connection";
 
 export default function App() {
   const [st, setSt] = useState<AppState | null>(null);
@@ -118,11 +119,13 @@ export default function App() {
       api.projectClose().then(() => reload()).then(() => { setDesign(null); setAnalysis(null); setTab("project"); }).catch((e) => toast(errText(e)));
     } else if (id === "night") {
       toggleTheme();
+    } else if (id === "export-code") {
+      api.exportCode().then((p) => toast(`Written to ${p}`)).catch((err) => toast(errText(err)));
     }
   };
 
   if (!st) return <div className="page muted">Loading…</div>;
-  const tabs: [Tab, string][] = [["design", "Design"], ["text", "Text"], ["costs", "Costs"]];
+  const tabs: [Tab, string][] = [["design", "Design"], ["text", "Text"], ["code", "Code"], ["costs", "Costs"]];
   const summary = analysis ? (analysis.ok ? (analysis.warnings ? `${analysis.warnings} warning${analysis.warnings > 1 ? "s" : ""}` : "design is clean") : `${analysis.errors} error${analysis.errors > 1 ? "s" : ""}`) : "";
 
   return (
@@ -143,6 +146,7 @@ export default function App() {
         {tab === "project" && <ProjectsPage st={st} reload={reload} toast={toast} onOpened={() => loadProject().then(() => setTab("design")).catch((e) => toast(errText(e)))} />}
         {tab === "design" && design && analysis && st.project && <DesignTab design={design} analysis={analysis} st={st} change={change} apply={apply} toast={toast} selectId={selectId} setSelectId={setSelectId} signal={signal} />}
         {tab === "text" && design && <TextTab design={design} onApply={applyText} onFormat={() => design && persist(design)} />}
+        {tab === "code" && design && analysis && <CodeTab design={design} analysis={analysis} toast={toast} />}
         {tab === "costs" && design && analysis && <CostsTab design={design} analysis={analysis} />}
         {tab === "connection" && <ConnectionTab st={st} toast={toast} />}
         {tab === "account" && <AccountTab st={st} toast={toast} onImported={(notes) => reload().then(() => loadProject()).then(() => { setTab("design"); toast(notes.join("\n")); }).catch((e) => toast(errText(e)))} />}
