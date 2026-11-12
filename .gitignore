@@ -9,3 +9,4 @@ app/src-tauri/gen/
 *.tfstate.backup
 .terraform/
 *.pem
+.claude/

@@ -2,7 +2,7 @@
 //! table of on-demand list prices (USD per hour; 730 hours a month); every number is an estimate and says so. The principle: the
 //! cheapest design that does the job is the default, and anything that costs money while idle is pointed out with the alternative.
 
-use crate::model::Design;
+use crate::model::{instance_type, Design, INSTANCE_TYPES};
 use serde::{Deserialize, Serialize};
 
 pub const HOURS: f64 = 730.0;
@@ -39,6 +39,28 @@ pub fn nat_per_gb(region: &str) -> f64 {
 pub fn eip_idle_hourly(region: &str) -> f64 {
     PRICES.iter().find(|p| p.0 == region).map(|p| p.3).unwrap_or(0.005)
 }
+/// a public IPv4 address, in use or not (charged since February 2024)
+pub const PUBLIC_IP_HOURLY: f64 = 0.005;
+/// the root volume every instance gets (8 GiB gp3)
+pub const ROOT_VOLUME_MONTHLY: f64 = 8.0 * 0.08;
+
+/// on-demand price of an instance type: the table has us-east-1 and ap-south-1; other regions are taken as us-east-1 × 1.1
+pub fn instance_hourly(t: &str, region: &str) -> f64 {
+    let Some(it) = instance_type(t) else { return 0.0 };
+    match region {
+        "us-east-1" => it.4,
+        "ap-south-1" => it.5,
+        _ => it.4 * 1.1,
+    }
+}
+
+/// the Graviton (arm64) type of the same size as an x86 type, if the table has one
+pub fn arm_equivalent(t: &str) -> Option<&'static str> {
+    let (family, size) = t.split_once('.')?;
+    let arm_family = match family { "t3" => "t4g", "m5" => "m6g", "c5" => "c6g", "r5" => "r6g", _ => return None };
+    let want = format!("{arm_family}.{size}");
+    INSTANCE_TYPES.iter().find(|i| i.0 == want).map(|i| i.0)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CostItem {
@@ -70,7 +92,9 @@ pub fn cost(d: &Design) -> CostReport {
     let nat_h = nat_hourly(&region);
     let mut items = vec![];
     let mut advice = vec![];
-    let free = |kind: &str| matches!(kind, "vpc" | "subnet" | "igw" | "rt");
+    let free = |kind: &str| matches!(kind, "vpc" | "subnet" | "igw" | "rt" | "sg" | "cidr");
+    let mut public_ips = 0;
+    let mut x86: Vec<(String, &str, f64)> = vec![];
     for n in &d.nodes {
         if free(&n.kind) {
             continue;
@@ -80,8 +104,38 @@ pub fn cost(d: &Design) -> CostReport {
             items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
                 note: format!("{nat_h} USD/h × {HOURS:.0} h = {} a month, plus {} per GB processed", money(monthly), money(nat_per_gb(&region))) });
         }
+        if n.kind == "ec2" {
+            let t = n.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let h = instance_hourly(t, &region);
+            let public = n.params.get("public_ip").and_then(|v| v.as_bool()).unwrap_or(false);
+            let ip = if public { PUBLIC_IP_HOURLY * HOURS } else { 0.0 };
+            let monthly = h * HOURS + ROOT_VOLUME_MONTHLY + ip;
+            items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
+                note: format!("{t}: {h:.4} USD/h × {HOURS:.0} h = {} running all month, + {} for the 8 GiB root volume{}", money(h * HOURS), money(ROOT_VOLUME_MONTHLY), if public { format!(", + {} for the public IPv4 address", money(ip)) } else { String::new() }) });
+            if public {
+                public_ips += 1;
+            }
+            if let Some(arm) = arm_equivalent(t) {
+                let save = (h - instance_hourly(arm, &region)) * HOURS;
+                if save > 0.0 {
+                    x86.push((n.label.clone(), arm, save));
+                }
+            }
+        }
     }
     let total: f64 = items.iter().map(|i| i.monthly).sum();
+    let instances = d.nodes.iter().filter(|n| n.kind == "ec2").count();
+    if instances > 0 {
+        let running: f64 = items.iter().filter(|i| i.kind == "ec2").map(|i| i.monthly).sum();
+        advice.push(format!("{instances} instance{} cost {} a month running all the time. Stopping them outside working hours (say 10 of 24 hours, 5 days a week) keeps about 70 % of that: only the volumes and public addresses are charged while stopped.", if instances == 1 { "" } else { "s" }, money(running)));
+    }
+    if !x86.is_empty() {
+        let save: f64 = x86.iter().map(|x| x.2).sum();
+        advice.push(format!("Graviton (arm64) instead of x86 saves {} a month: {}. Most Linux software runs on arm64 unchanged.", money(save), x86.iter().map(|(l, arm, s)| format!("{l} → {arm} ({})", money(*s))).collect::<Vec<_>>().join(", ")));
+    }
+    if public_ips > 0 {
+        advice.push(format!("{public_ips} public IPv4 address{} cost {} a month. Instances that only serve the VPC need none; for shell access use SSM Session Manager (free) instead of SSH over a public address.", if public_ips == 1 { "" } else { "es" }, money(public_ips as f64 * PUBLIC_IP_HOURLY * HOURS)));
+    }
 
     // advice: NAT Gateways are the only idle cost in this version, and the usual one in a VPC
     let nats: Vec<_> = d.nodes.iter().filter(|n| n.kind == "nat").collect();
@@ -101,8 +155,8 @@ pub fn cost(d: &Design) -> CostReport {
         }
         advice.push("For a lab that is used by day only, destroy the NAT Gateways at night and recreate them in the morning: the cost is per hour (the \"Tear down for the night\" action comes with plan/apply).".into());
     }
-    if nats.is_empty() && d.nodes.iter().any(|n| n.kind == "subnet") {
-        advice.push("No NAT Gateway: this network costs nothing a month by itself. VPCs, subnets, Internet Gateways and route tables are free; only what runs inside them costs money.".into());
+    if nats.is_empty() && instances == 0 && d.nodes.iter().any(|n| n.kind == "subnet") {
+        advice.push("No NAT Gateway and no instance: this network costs nothing a month by itself. VPCs, subnets, Internet Gateways, route tables and security groups are free; only what runs inside them costs money.".into());
     }
     CostReport {
         items,
@@ -113,6 +167,7 @@ pub fn cost(d: &Design) -> CostReport {
             format!("On-demand list prices for {} ({} USD/h per NAT Gateway), {HOURS:.0} hours a month, no traffic.", d.region, nat_h),
             "Data transfer is not included: NAT processing and internet egress are charged per GB.".into(),
             "Free: VPC, subnets, Internet Gateway, route tables, security groups. An Elastic IP costs USD 0.005/h; the one a NAT Gateway uses is included above.".into(),
+            "Instances: on-demand Linux prices (us-east-1 and ap-south-1 from the table; other regions as us-east-1 × 1.1), an 8 GiB gp3 root volume, a public IPv4 address at USD 0.005/h when turned on. Spot and Savings Plans are cheaper and come later.".into(),
         ],
     }
 }
@@ -136,6 +191,10 @@ mod tests {
         let single = cost(&templates::build("single_public").unwrap());
         assert_eq!(single.total, 0.0);
         assert!(single.advice[0].contains("costs nothing"));
+        assert_eq!(instance_hourly("t4g.micro", "ap-south-1"), 0.0084);
+        assert!((instance_hourly("t3.micro", "eu-west-1") - 0.0104 * 1.1).abs() < 1e-9);
+        assert_eq!(arm_equivalent("t3.small"), Some("t4g.small"));
+        assert_eq!(arm_equivalent("g4dn.xlarge"), None);
     }
 
     #[test]

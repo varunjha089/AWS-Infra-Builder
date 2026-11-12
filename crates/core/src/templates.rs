@@ -19,6 +19,14 @@ pub const TEMPLATES: &[Template] = &[
         text: "net \"Single public subnet\"\nregion ap-south-1\nazs 1\n\nvpc main 10.0.0.0/16\nigw igw in main\nsubnet public_a public 10.0.0.0/24 az a in main rt public\nrt public in main: 0.0.0.0/0 -> igw\n",
     },
     Template {
+        key: "web_server",
+        title: "One web server (cheapest)",
+        about: "A public subnet, one t4g.micro (about USD 7 a month in Mumbai) with a public address, HTTPS open to the internet and SSH only from your own address range. Change `office` to your IP. The cheapest thing that serves a website.",
+        text: "net \"One web server\"\nregion ap-south-1\nazs 1\n\nvpc main 10.0.0.0/16\nigw igw in main\nsubnet public_a public 10.0.0.0/24 az a in main rt public\n\
+ec2 web_1 t4g.micro in public_a sg web key my_key public\nrt public in main: 0.0.0.0/0 -> igw\nsg web in main\n\ncidr internet 0.0.0.0/0\ncidr office 203.0.113.0/24\n\n\
+rule internet -> web tcp 443\nrule internet -> web tcp 80\nrule office -> web tcp ssh\n",
+    },
+    Template {
         key: "two_tier",
         title: "Two-tier VPC (2 AZs)",
         about: "Public and private subnets in two Availability Zones, one NAT Gateway per AZ (no single point of failure; about USD 64 a month idle). The network of a load balancer in front of application servers.",
@@ -26,7 +34,7 @@ pub const TEMPLATES: &[Template] = &[
 subnet public_a public 10.0.0.0/20 az a in main rt public\nsubnet public_b public 10.0.16.0/20 az b in main rt public\n\
 subnet app_a private 10.0.32.0/20 az a in main rt app_a_rt\nsubnet app_b private 10.0.48.0/20 az b in main rt app_b_rt\n\
 nat nat_a in public_a\nnat nat_b in public_b\n\
-rt public in main: 0.0.0.0/0 -> igw\nrt app_a_rt in main: 0.0.0.0/0 -> nat_a\nrt app_b_rt in main: 0.0.0.0/0 -> nat_b\n",
+rt public in main: 0.0.0.0/0 -> igw\nrt app_a_rt in main: 0.0.0.0/0 -> nat_a\nrt app_b_rt in main: 0.0.0.0/0 -> nat_b\nsg app in main\nsg web in main\n\ncidr internet 0.0.0.0/0\n\nrule internet -> web tcp 443\nrule web -> app tcp 8080\n",
     },
     Template {
         key: "three_tier",
@@ -79,6 +87,8 @@ mod tests {
             if t.key == "three_tier" {
                 assert_eq!(a.warnings, 1, "{:?}", a.problems);
                 assert!(a.problems[0].contains("is in AZ a"));
+            } else if t.key == "two_tier" {
+                assert!(a.problems.iter().all(|p| p.contains("No instance uses")), "{:?}", a.problems);
             } else if t.key != "broken" {
                 assert_eq!(a.warnings, 0, "{:?}", a.problems);
             }

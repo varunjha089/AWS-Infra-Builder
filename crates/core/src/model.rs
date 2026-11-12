@@ -1,6 +1,8 @@
-//! The design: blocks (nodes) that live inside one another (region ⊃ VPC ⊃ subnet ⊃ NAT) and arrows (edges) between them.
-//! Phase 0 kinds: vpc, subnet, igw (Internet Gateway), nat (NAT Gateway), rt (route table). Two arrow kinds: `attach`
-//! (subnet → route table: the subnet uses that table) and `route` (route table → igw / nat, with the destination in params.dest).
+//! The design: blocks (nodes) that live inside one another (region ⊃ VPC ⊃ subnet ⊃ NAT / instance) and arrows (edges) between
+//! them. Kinds: vpc, subnet, igw (Internet Gateway), nat (NAT Gateway), rt (route table), sg (security group), ec2 (instance), cidr
+//! (an address range outside the design: the internet, an office). Arrow kinds: `attach` (subnet → route table: the subnet uses that
+//! table), `route` (route table → igw / nat, params.dest) and `traffic` (sg / cidr → sg / cidr, params.proto + params.ports: the
+//! target allows that traffic in from the source, and the source lets it out).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -82,6 +84,42 @@ pub const KINDS: &[(&str, &str, &str)] = &[
     ("igw", "Internet Gateway", "vpc"),
     ("nat", "NAT Gateway", "subnet"),
     ("rt", "Route table", "vpc"),
+    ("sg", "Security group", "vpc"),
+    ("ec2", "EC2 instance", "subnet"),
+    ("cidr", "Address range", ""),
+];
+
+/// the common ports by name, for the arrow label and the checks
+pub const PORTS: &[(&str, u16)] = &[("ssh", 22), ("rdp", 3389), ("http", 80), ("https", 443), ("mysql", 3306), ("postgres", 5432), ("mssql", 1433), ("mongodb", 27017), ("redis", 6379)];
+
+/// (type, vCPU, memory GiB, arch, USD/h in us-east-1, USD/h in ap-south-1); other regions: us-east-1 × 1.1 (said in the assumptions)
+pub const INSTANCE_TYPES: &[(&str, u8, f64, &str, f64, f64)] = &[
+    ("t4g.nano", 2, 0.5, "arm64", 0.0042, 0.0042),
+    ("t4g.micro", 2, 1.0, "arm64", 0.0084, 0.0084),
+    ("t4g.small", 2, 2.0, "arm64", 0.0168, 0.0168),
+    ("t4g.medium", 2, 4.0, "arm64", 0.0336, 0.0336),
+    ("t4g.large", 2, 8.0, "arm64", 0.0672, 0.0672),
+    ("t3.micro", 2, 1.0, "x86_64", 0.0104, 0.0112),
+    ("t3.small", 2, 2.0, "x86_64", 0.0208, 0.0224),
+    ("t3.medium", 2, 4.0, "x86_64", 0.0416, 0.0448),
+    ("t3.large", 2, 8.0, "x86_64", 0.0832, 0.0896),
+    ("m6g.large", 2, 8.0, "arm64", 0.077, 0.0816),
+    ("m5.large", 2, 8.0, "x86_64", 0.096, 0.101),
+    ("c6g.large", 2, 4.0, "arm64", 0.068, 0.0712),
+    ("c5.large", 2, 4.0, "x86_64", 0.085, 0.089),
+    ("r6g.large", 2, 16.0, "arm64", 0.1008, 0.1056),
+    ("g4dn.xlarge", 4, 16.0, "x86_64", 0.526, 0.526),
+];
+
+pub fn instance_type(t: &str) -> Option<&'static (&'static str, u8, f64, &'static str, f64, f64)> {
+    INSTANCE_TYPES.iter().find(|i| i.0 == t)
+}
+
+/// (os key, title, the AMI search: owner and name pattern)
+pub const OS: &[(&str, &str, &str, &str)] = &[
+    ("al2023", "Amazon Linux 2023", "amazon", "al2023-ami-2023.*-{arch}"),
+    ("ubuntu", "Ubuntu 24.04 LTS", "099720109477", "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-{ubuntu_arch}-server-*"),
+    ("debian", "Debian 12", "136693071363", "debian-12-{arch}-*"),
 ];
 
 pub const TIERS: &[&str] = &["public", "private", "isolated"];
@@ -126,11 +164,21 @@ pub fn is_container(kind: &str) -> bool {
     matches!(kind, "vpc" | "subnet")
 }
 
+/// blocks that stand in the region beside the VPCs
+pub fn is_region_level(kind: &str) -> bool {
+    parent_kind(kind) == Some("")
+}
+
 /// the parameters a new block of this kind starts with
 pub fn defaults(kind: &str) -> Params {
     let v = match kind {
         "vpc" => json!({"cidr": "10.0.0.0/16"}),
         "subnet" => json!({"cidr": "", "az": "a", "tier": "public"}),
+        // egress "all": AWS's default (everything out); "rules": only what the arrows leaving the group say
+        "sg" => json!({"egress": "all", "description": ""}),
+        // the cheapest type that runs a small service; no public address unless asked (an IPv4 address costs money)
+        "ec2" => json!({"type": "t4g.micro", "os": "al2023", "key": "", "public_ip": false, "sgs": []}),
+        "cidr" => json!({"cidr": "0.0.0.0/0"}),
         _ => json!({}),
     };
     v.as_object().cloned().unwrap_or_default()
@@ -146,7 +194,57 @@ pub fn edge_kind(source: &str, target: &str) -> Option<&'static str> {
     match (source, target) {
         ("subnet", "rt") => Some("attach"),
         ("rt", "igw") | ("rt", "nat") => Some("route"),
+        ("sg", "sg") | ("sg", "cidr") | ("cidr", "sg") => Some("traffic"),
         _ => None,
+    }
+}
+
+/// "tcp 443", "tcp 8080-8090", "udp 53", "icmp", "all"; port names (ssh, https, postgres …) are accepted
+pub fn parse_ports(proto: &str, ports: &str) -> Result<(u16, u16), String> {
+    let proto = proto.trim().to_lowercase();
+    let ports = ports.trim().to_lowercase();
+    if proto == "all" || proto == "-1" {
+        return Ok((0, 65535));
+    }
+    if proto == "icmp" {
+        return Ok((0, 0));
+    }
+    if proto != "tcp" && proto != "udp" {
+        return Err(format!("protocol \"{proto}\": write tcp, udp, icmp or all"));
+    }
+    if ports.is_empty() || ports == "all" {
+        return Ok((0, 65535));
+    }
+    if let Some(p) = PORTS.iter().find(|p| p.0 == ports) {
+        return Ok((p.1, p.1));
+    }
+    let (a, b) = match ports.split_once('-') {
+        Some((a, b)) => (a.trim(), b.trim()),
+        None => (ports.as_str(), ports.as_str()),
+    };
+    match (a.parse::<u16>(), b.parse::<u16>()) {
+        (Ok(a), Ok(b)) if a <= b => Ok((a, b)),
+        _ => Err(format!("ports \"{ports}\": write a port (443), a range (8080-8090), a name (ssh, https, postgres) or all")),
+    }
+}
+
+/// the arrow's label: "tcp 5432 (postgres)", "all traffic"
+pub fn traffic_label(proto: &str, ports: &str) -> String {
+    let proto = proto.trim().to_lowercase();
+    if proto == "all" || proto == "-1" {
+        return "all traffic".into();
+    }
+    if proto == "icmp" {
+        return "icmp".into();
+    }
+    match parse_ports(&proto, ports) {
+        Ok((a, b)) if a == 0 && b == 65535 => format!("{proto} all ports"),
+        Ok((a, b)) if a == b => match PORTS.iter().find(|p| p.1 == a) {
+            Some(p) => format!("{proto} {a} ({})", p.0),
+            None => format!("{proto} {a}"),
+        },
+        Ok((a, b)) => format!("{proto} {a}-{b}"),
+        Err(_) => format!("{proto} {}?", ports.trim()),
     }
 }
 
@@ -287,7 +385,11 @@ impl Design {
             return None;
         }
         let id = self.next_edge_id();
-        let params = if kind == "route" { json!({"dest": "0.0.0.0/0"}).as_object().cloned().unwrap_or_default() } else { Params::new() };
+        let params = match kind {
+            "route" => json!({"dest": "0.0.0.0/0"}).as_object().cloned().unwrap_or_default(),
+            "traffic" => json!({"proto": "tcp", "ports": "443"}).as_object().cloned().unwrap_or_default(),
+            _ => Params::new(),
+        };
         self.edges.push(Edge { id: id.clone(), source: source.into(), target: target.into(), kind: kind.into(), params });
         Some(id)
     }
@@ -429,14 +531,21 @@ pub fn arrange(d: &mut Design) {
             n.x = PAD + i as f64 * 180.0;
             n.y = rt_y;
         }
-        let others: Vec<String> = d.children(vid).iter().filter(|n| !matches!(n.kind.as_str(), "igw" | "rt" | "subnet")).map(|n| n.id.clone()).collect();
+        let sgs: Vec<String> = d.children(vid).iter().filter(|n| n.kind == "sg").map(|n| n.id.clone()).collect();
+        let sg_y = rt_y + if rts.is_empty() { 0.0 } else { 74.0 };
+        for (i, id) in sgs.iter().enumerate() {
+            let n = d.node_mut(id).unwrap();
+            n.x = PAD + i as f64 * 180.0;
+            n.y = sg_y;
+        }
+        let others: Vec<String> = d.children(vid).iter().filter(|n| !matches!(n.kind.as_str(), "igw" | "rt" | "subnet" | "sg")).map(|n| n.id.clone()).collect();
         for (i, id) in others.iter().enumerate() {
             let n = d.node_mut(id).unwrap();
             n.x = PAD + tops.len() as f64 * 190.0 + i as f64 * 190.0;
             n.y = 44.0;
         }
-        let w = (grid_w + PAD).max(PAD + (tops.len() + others.len()).max(rts.len()) as f64 * 190.0).max(420.0);
-        let h = rt_y + 60.0 + PAD;
+        let w = (grid_w + PAD).max(PAD + (tops.len() + others.len()).max(rts.len()).max(sgs.len()) as f64 * 190.0).max(420.0);
+        let h = sg_y + 60.0 + PAD;
         let v = d.node_mut(vid).unwrap();
         v.x = 40.0;
         v.y = vy;
@@ -444,13 +553,17 @@ pub fn arrange(d: &mut Design) {
         v.h = h;
         vy += h + 40.0;
     }
-    // blocks in the region that are not VPCs: a row to the right
+    // blocks in the region that are not VPCs (address ranges such as the internet): a column to the left of the VPCs
     let loose: Vec<String> = d.nodes.iter().filter(|n| n.parent.is_none() && n.kind != "vpc").map(|n| n.id.clone()).collect();
-    let right = d.nodes.iter().filter(|n| n.kind == "vpc").map(|n| n.x + n.w).fold(0.0, f64::max) + 40.0;
-    for (i, id) in loose.iter().enumerate() {
-        let n = d.node_mut(id).unwrap();
-        n.x = right;
-        n.y = 40.0 + i as f64 * 70.0;
+    if !loose.is_empty() {
+        for id in d.nodes.iter().filter(|n| n.kind == "vpc").map(|n| n.id.clone()).collect::<Vec<_>>() {
+            d.node_mut(&id).unwrap().x = 260.0;
+        }
+        for (i, id) in loose.iter().enumerate() {
+            let n = d.node_mut(id).unwrap();
+            n.x = 40.0;
+            n.y = 40.0 + i as f64 * 80.0;
+        }
     }
     d.sort_parents_first();
 }
@@ -515,6 +628,36 @@ mod tests {
         let vpc = d.by_label("vpc1").unwrap();
         assert!(vpc.w >= at("subnet2").0 + SUB_W && vpc.h >= at("rt1").1 + 40.0);
         assert_eq!(d.nodes[0].kind, "vpc");
+    }
+
+    #[test]
+    fn ports_and_labels_of_traffic() {
+        assert_eq!(parse_ports("tcp", "443"), Ok((443, 443)));
+        assert_eq!(parse_ports("tcp", "postgres"), Ok((5432, 5432)));
+        assert_eq!(parse_ports("TCP", "8080-8090"), Ok((8080, 8090)));
+        assert_eq!(parse_ports("udp", "all"), Ok((0, 65535)));
+        assert_eq!(parse_ports("all", ""), Ok((0, 65535)));
+        assert_eq!(parse_ports("icmp", ""), Ok((0, 0)));
+        assert!(parse_ports("tcp", "99999").is_err());
+        assert!(parse_ports("tcp", "90-80").is_err());
+        assert!(parse_ports("gre", "1").is_err());
+        assert_eq!(traffic_label("tcp", "5432"), "tcp 5432 (postgres)");
+        assert_eq!(traffic_label("tcp", "8080"), "tcp 8080");
+        assert_eq!(traffic_label("all", ""), "all traffic");
+        assert_eq!(traffic_label("tcp", "x"), "tcp x?");
+        let mut d = Design::default();
+        let v = d.add("vpc", None).unwrap();
+        let a = d.add("sg", Some(&v)).unwrap();
+        let b = d.add("sg", Some(&v)).unwrap();
+        let net = d.add("cidr", None).unwrap();
+        assert!(d.connect(&net, &a).is_some());
+        assert!(d.connect(&a, &b).is_some());
+        assert!(d.connect(&b, &v).is_none());
+        assert_eq!(d.edges[0].kind, "traffic");
+        assert_eq!(d.edges[0].params["ports"], "443");
+        assert_eq!(d.param_str(&net, "cidr"), "0.0.0.0/0");
+        arrange(&mut d);
+        assert!(d.node(&net).unwrap().x < d.node(&v).unwrap().x, "address ranges stand left of the VPCs");
     }
 
     #[test]

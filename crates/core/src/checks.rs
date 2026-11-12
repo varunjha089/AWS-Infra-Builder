@@ -3,7 +3,7 @@
 //! shown with their arithmetic, as NN Builder shows its shape formula.
 
 use crate::cidr::Cidr;
-use crate::model::{az_letters, edge_kind, parent_kind, region_azs, title, Design, Node, TIERS};
+use crate::model::{az_letters, edge_kind, instance_type, parent_kind, parse_ports, region_azs, title, traffic_label, Design, Node, PORTS, TIERS};
 use crate::pricing::{self, CostReport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -313,6 +313,120 @@ pub fn analyse(d: &Design) -> Analysis {
         summary.insert(rt.id.clone(), format!("{} route{} · {} subnet{}", routes.len() + 1, if routes.is_empty() { "" } else { "s" }, attached.len(), if attached.len() == 1 { "" } else { "s" }));
     }
 
+    // ---- address ranges (the internet, an office)
+    for c in d.nodes.iter().filter(|n| n.kind == "cidr") {
+        match Cidr::parse(p(c, "cidr")) {
+            Err(e) => cx.error(&c.id, format!("Range: {e}.")),
+            Ok(r) => {
+                summary.insert(c.id.clone(), if r.prefix == 0 { "anywhere (the whole internet)".into() } else { format!("{r} · {} addresses", r.size()) });
+                if !d.edges.iter().any(|e| e.source == c.id || e.target == c.id) {
+                    cx.warn(&c.id, "No rule uses this range. Draw an arrow from it to a security group (traffic in) or from a group to it (traffic out).");
+                }
+            }
+        }
+    }
+
+    // ---- security groups and traffic arrows
+    let risky = |a: u16, b: u16| -> Vec<&'static str> { PORTS.iter().filter(|(n, port)| matches!(*n, "ssh" | "rdp" | "mysql" | "postgres" | "mssql" | "mongodb" | "redis") && a <= *port && *port <= b).map(|(n, _)| *n).collect() };
+    for g in d.nodes.iter().filter(|n| n.kind == "sg") {
+        let inbound: Vec<&crate::model::Edge> = d.edges.iter().filter(|e| e.kind == "traffic" && e.target == g.id).collect();
+        let outbound: Vec<&crate::model::Edge> = d.edges.iter().filter(|e| e.kind == "traffic" && e.source == g.id).collect();
+        let members: Vec<&Node> = d.nodes.iter().filter(|n| n.kind == "ec2" && n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().any(|v| v.as_str() == Some(&g.id))).unwrap_or(false)).collect();
+        let egress_all = p(g, "egress") != "rules";
+        let mut lines = vec![];
+        for e in &inbound {
+            lines.push(format!("in: {} from {}", traffic_label(ep(e, "proto"), ep(e, "ports")), d.node(&e.source).map(|n| n.label.clone()).unwrap_or_default()));
+        }
+        if egress_all {
+            lines.push("out: all traffic to anywhere (AWS's default)".into());
+        } else {
+            for e in &outbound {
+                lines.push(format!("out: {} to {}", traffic_label(ep(e, "proto"), ep(e, "ports")), d.node(&e.target).map(|n| n.label.clone()).unwrap_or_default()));
+            }
+            if outbound.is_empty() {
+                lines.push("out: nothing (egress rules, none drawn)".into());
+            }
+        }
+        // an arrow to another group is that group's ingress rule; an arrow to an address range is only an egress rule, and with
+        // egress "all" it adds nothing
+        if egress_all && outbound.iter().any(|e| d.node(&e.target).map(|t| t.kind == "cidr").unwrap_or(false)) {
+            cx.warn(&g.id, "Egress is \"all\" (AWS's default), so the arrows from this group to an address range add nothing. Set egress to \"rules\" to allow out only what the arrows say.");
+        }
+        if members.is_empty() {
+            cx.warn(&g.id, "No instance uses this security group. Tick it on an instance, or delete the group.");
+        }
+        if inbound.is_empty() && (egress_all || outbound.is_empty()) {
+            cx.warn(&g.id, "No rule lets anything in: instances in this group cannot be reached. Draw an arrow from a group or an address range to it.");
+        }
+        info.entry(g.id.clone()).or_default().extend(lines);
+        info.entry(g.id.clone()).or_default().push(format!("Used by {}", if members.is_empty() { "no instance".to_string() } else { members.iter().map(|m| m.label.clone()).collect::<Vec<_>>().join(", ") }));
+        summary.insert(g.id.clone(), format!("{} in · {} · {} instance{}", inbound.len(), if egress_all { "all out".to_string() } else { format!("{} out", outbound.len()) }, members.len(), if members.len() == 1 { "" } else { "s" }));
+    }
+    for e in d.edges.iter().filter(|e| e.kind == "traffic") {
+        let (Some(s), Some(t)) = (d.node(&e.source), d.node(&e.target)) else { continue };
+        match parse_ports(ep(e, "proto"), ep(e, "ports")) {
+            Err(m) => cx.error(&e.id, format!("Traffic: {m}.")),
+            Ok((a, b)) => {
+                // the world may reach a listening port: fine for web, a mistake for SSH, RDP and databases
+                let world = s.kind == "cidr" && Cidr::parse(p(s, "cidr")).map(|c| c.prefix == 0).unwrap_or(false);
+                if world && t.kind == "sg" {
+                    let r = risky(a, b);
+                    if !r.is_empty() {
+                        cx.warn(&e.id, format!("{} open to the whole internet ({}). Allow it only from your own address range (add an Address range block with your office or home IP), or use SSM Session Manager and no inbound port at all.", r.join(", "), p(s, "cidr")));
+                    }
+                }
+                if s.kind == "sg" && t.kind == "sg" && s.parent != t.parent {
+                    cx.error(&e.id, format!("{} and {} are in different VPCs: a rule can only reference a group of its own VPC (use the other VPC's CIDR as an Address range instead).", s.label, t.label));
+                }
+            }
+        }
+    }
+
+    // ---- instances
+    for n in d.nodes.iter().filter(|n| n.kind == "ec2") {
+        let t = p(n, "type");
+        let sub = n.parent.as_ref().and_then(|pid| d.node(pid)).filter(|s| s.kind == "subnet");
+        let public_ip = n.params.get("public_ip").and_then(|v| v.as_bool()).unwrap_or(false);
+        let sgs: Vec<&Node> = n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).filter_map(|id| d.node(id)).collect()).unwrap_or_default();
+        match instance_type(t) {
+            None => cx.error(&n.id, format!("\"{t}\" is not an instance type the app knows. Choose one in the inspector.")),
+            Some(it) => {
+                let hourly = crate::pricing::instance_hourly(t, &d.region);
+                info.entry(n.id.clone()).or_default().push(format!("{t}: {} vCPU, {} GiB, {} · USD {hourly:.4}/h × {:.0} h = USD {:.2} a month while running", it.1, it.2, it.3, crate::pricing::HOURS, hourly * crate::pricing::HOURS));
+                if it.3 == "x86_64" {
+                    if let Some(arm) = crate::pricing::arm_equivalent(t) {
+                        let save = (hourly - crate::pricing::instance_hourly(arm, &d.region)) * crate::pricing::HOURS;
+                        if save > 0.0 {
+                            info.entry(n.id.clone()).or_default().push(format!("{arm} (Graviton, same size) would save USD {save:.2} a month; most Linux software runs on arm64 unchanged."));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(s) = sub {
+            let tier = p(s, "tier");
+            if public_ip && tier != "public" {
+                cx.warn(&n.id, format!("A public IP on an instance in a {tier} subnet is unreachable (no route from the Internet Gateway) and still costs USD 3.65 a month. Turn it off, or move the instance to a public subnet."));
+            }
+            if public_ip {
+                info.entry(n.id.clone()).or_default().push("Public IPv4 address: USD 0.005/h = USD 3.65 a month (charged since 2024).".into());
+            }
+            let wants_in = sgs.iter().any(|g| d.edges.iter().any(|e| e.kind == "traffic" && e.target == g.id && d.node(&e.source).map(|src| src.kind == "cidr").unwrap_or(false)));
+            if tier == "public" && !public_ip && wants_in {
+                cx.warn(&n.id, "A rule lets traffic in from outside, but the instance has no public IP: nothing outside the VPC can reach it. Turn the public IP on (USD 3.65 a month), or reach it through SSM Session Manager.");
+            }
+        }
+        if sgs.is_empty() {
+            cx.warn(&n.id, "No security group: AWS attaches the VPC's default group (all traffic between its members, everything out). Tick a group in the inspector.");
+        }
+        let ssh_in = sgs.iter().any(|g| d.edges.iter().any(|e| e.kind == "traffic" && e.target == g.id && parse_ports(ep(e, "proto"), ep(e, "ports")).map(|(a, b)| a <= 22 && 22 <= b).unwrap_or(false)));
+        if ssh_in && p(n, "key").trim().is_empty() {
+            cx.warn(&n.id, "SSH is allowed in, but no key pair is named: you could not log in. Name an existing EC2 key pair, or use SSM Session Manager instead of SSH.");
+        }
+        summary.insert(n.id.clone(), format!("{t} · {} · USD {:.0}/month{}", p(n, "os"), crate::pricing::instance_hourly(t, &d.region) * crate::pricing::HOURS + if public_ip { 3.65 } else { 0.0 }, if public_ip { " · public IP" } else { "" }));
+        info.entry(n.id.clone()).or_default().push(format!("Security groups: {}", if sgs.is_empty() { "none (the VPC's default)".to_string() } else { sgs.iter().map(|g| g.label.clone()).collect::<Vec<_>>().join(", ") }));
+    }
+
     // ---- arrows between the wrong kinds (made by hand in the file)
     let mut edge_results = vec![];
     for e in &d.edges {
@@ -321,7 +435,7 @@ pub fn analyse(d: &Design) -> Analysis {
             continue;
         };
         if edge_kind(&s.kind, &t.kind) != Some(e.kind.as_str()) {
-            cx.error(&e.id, format!("An arrow from a {} to a {} means nothing here. Subnets attach to route tables; route tables route to gateways.", title(&s.kind), title(&t.kind)));
+            cx.error(&e.id, format!("An arrow from a {} to a {} means nothing here. Subnets attach to route tables; route tables route to gateways; security groups and address ranges carry traffic.", title(&s.kind), title(&t.kind)));
         }
         if e.kind == "route" && s.parent != t.parent.as_ref().and_then(|pid| d.node(pid)).and_then(|n| if n.kind == "subnet" { n.parent.clone() } else { Some(n.id.clone()) }) {
             cx.error(&e.id, format!("{} and {} are in different VPCs: a route table can only route to gateways of its own VPC.", s.label, t.label));
@@ -329,6 +443,7 @@ pub fn analyse(d: &Design) -> Analysis {
         let label = match e.kind.as_str() {
             "route" => ep(e, "dest").to_string(),
             "attach" => "uses".into(),
+            "traffic" => traffic_label(ep(e, "proto"), ep(e, "ports")),
             _ => String::new(),
         };
         edge_results.push(EdgeResult { id: e.id.clone(), status: cx.status.get(&e.id).cloned().unwrap_or_else(|| "ok".into()), messages: cx.msgs.get(&e.id).cloned().unwrap_or_default(), label });
@@ -466,6 +581,33 @@ mod tests {
         let a = analyse(&d);
         assert!(messages(&a, &d, "app_b").contains("is in AZ a"));
         assert!(messages(&a, &d, "main").contains("us-west-1 has 2 Availability Zones"));
+    }
+
+    #[test]
+    fn security_groups_and_instances() {
+        let d = design("vpc main 10.0.0.0/16\nigw igw in main\nsubnet pub public 10.0.0.0/24 az a in main rt pub_rt\nsubnet app private 10.0.1.0/24 az a in main\n\
+            ec2 web_1 t4g.micro in pub sg web public\nec2 job t3.small in app public\nec2 lonely t4g.nano in app sg db key k\nrt pub_rt in main: 0.0.0.0/0 -> igw\n\
+            sg web in main\nsg db in main\nsg idle in main egress rules\n\ncidr internet 0.0.0.0/0\ncidr office 203.0.113.0/24\ncidr unused 198.51.100.0/24\n\n\
+            rule internet -> web tcp 443\nrule internet -> web tcp ssh\nrule office -> db tcp postgres\nrule web -> db tcp 5432\nrule web -> internet tcp 80\n");
+        let a = analyse(&d);
+        assert!(messages(&a, &d, "web_1").contains("no key pair"), "{}", messages(&a, &d, "web_1"));
+        assert!(messages(&a, &d, "job").contains("public IP on an instance in a private subnet"));
+        assert!(messages(&a, &d, "job").contains("No security group"));
+        assert_eq!(status(&a, &d, "lonely"), "ok", "{}", messages(&a, &d, "lonely"));
+        assert!(messages(&a, &d, "web").contains("Egress is \"all\""), "web -> internet with egress all: {}", messages(&a, &d, "web"));
+        assert!(!messages(&a, &d, "db").contains("Egress"), "{}", messages(&a, &d, "db"));
+        assert!(messages(&a, &d, "idle").contains("No instance uses"));
+        assert!(messages(&a, &d, "unused").contains("No rule uses"));
+        let em: Vec<String> = a.edges.iter().flat_map(|e| e.messages.clone()).collect();
+        assert!(em.iter().any(|m| m.contains("ssh open to the whole internet")), "{em:?}");
+        assert!(!em.iter().any(|m| m.contains("postgres open")), "office is not the world: {em:?}");
+        let web = a.nodes.iter().find(|n| n.id == d.by_label("web").unwrap().id).unwrap();
+        assert!(web.info.iter().any(|i| i == "in: tcp 443 (https) from internet"), "{:?}", web.info);
+        assert!(web.summary.starts_with("2 in · all out · 1 instance"), "{}", web.summary);
+        let job = a.nodes.iter().find(|n| n.id == d.by_label("job").unwrap().id).unwrap();
+        assert!(job.info.iter().any(|i| i.contains("t4g.small (Graviton, same size) would save")), "{:?}", job.info);
+        assert!(a.cost.items.iter().any(|i| i.kind == "ec2"));
+        assert!(a.cost.total > 20.0, "{}", a.cost.total);
     }
 
     #[test]

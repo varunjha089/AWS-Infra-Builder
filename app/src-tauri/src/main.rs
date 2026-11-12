@@ -8,7 +8,7 @@ use aib_core::checks::{self, Analysis};
 use aib_core::creds::{self, Source};
 use aib_core::dsl;
 use aib_core::import;
-use aib_core::model::{self, Design, KINDS, REGIONS, TIERS};
+use aib_core::model::{self, Design, INSTANCE_TYPES, KINDS, OS, PORTS, REGIONS, TIERS};
 use aib_core::store::{self, Project};
 use aib_core::templates;
 use serde::Serialize;
@@ -64,6 +64,9 @@ fn app_state(st: State<'_, App>) -> Value {
         "regions": REGIONS.iter().map(|r| json!({"id": r.0, "name": r.1, "azs": r.2})).collect::<Vec<_>>(),
         "kinds": KINDS.iter().map(|k| json!({"kind": k.0, "title": k.1, "parent": k.2})).collect::<Vec<_>>(),
         "tiers": TIERS,
+        "instance_types": INSTANCE_TYPES.iter().map(|i| json!({"type": i.0, "vcpu": i.1, "memory": i.2, "arch": i.3, "us_east_1": i.4, "ap_south_1": i.5})).collect::<Vec<_>>(),
+        "os": OS.iter().map(|o| json!({"key": o.0, "title": o.1})).collect::<Vec<_>>(),
+        "ports": PORTS.iter().map(|p| json!({"name": p.0, "port": p.1})).collect::<Vec<_>>(),
     })
 }
 
@@ -423,6 +426,9 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &item("add-igw", "Add Internet Gateway", None)?,
         &item("add-nat", "Add NAT Gateway", None)?,
         &item("add-rt", "Add Route table", None)?,
+        &item("add-sg", "Add Security group", None)?,
+        &item("add-ec2", "Add EC2 instance", None)?,
+        &item("add-cidr", "Add Address range", None)?,
     ])?;
     menu.append_items(&[&file, &edit, &view, &design])?;
     Ok(menu)

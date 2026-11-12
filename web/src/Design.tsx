@@ -9,7 +9,7 @@ import "@xyflow/react/dist/style.css";
 import { api, errText, type Analysis, type AppState, type DNode, type Design, type EdgeResult, type Loaded, type NodeResult } from "./api";
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
 
-export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5" };
+export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569" };
 const CONTAINER = (kind: string) => kind === "vpc" || kind === "subnet";
 
 type Data = { node: DNode; result?: NodeResult; azName: string };
@@ -42,11 +42,12 @@ function BlockNode({ data, selected }: NodeProps<Node<Data>>) {
   const st = r?.status ?? "ok";
   return (
     <div className={`block st-${st} ${selected ? "sel" : ""}`} style={{ "--c": color(n) } as CSSProperties}>
-      {n.kind !== "igw" && n.kind !== "nat" && <Handle type="target" position={Position.Left} />}
+      {(n.kind === "rt" || n.kind === "sg" || n.kind === "cidr") && <Handle type="target" position={Position.Left} />}
       {(n.kind === "igw" || n.kind === "nat") && <Handle type="target" position={Position.Top} />}
       <div className="lh"><span>{r?.title ?? n.kind}{mark(st)}</span><span className="bl">{n.label}</span></div>
       <div className={`ls st-${st}`}>{st !== "ok" ? r?.messages[0] : r?.summary || ""}</div>
       {n.kind === "rt" && <Handle type="source" position={Position.Right} title="drag to a gateway" />}
+      {(n.kind === "sg" || n.kind === "cidr") && <Handle type="source" position={Position.Right} title="drag to a security group or an address range: traffic" />}
     </div>
   );
 }
@@ -181,7 +182,7 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
       let cur = sel;
       while (cur && cur.kind !== want) cur = design.nodes.find((n) => n.id === cur!.parent);
       parent = cur?.id ?? (kind === "nat" ? design.nodes.find((n) => n.kind === "subnet" && n.params.tier === "public")?.id : undefined) ?? design.nodes.find((n) => n.kind === want)?.id ?? null;
-      if (!parent) { toast(want === "vpc" ? "Add a VPC first: every other block lives in one." : "A NAT Gateway lives in a (public) subnet: add a subnet first."); return; }
+      if (!parent) { toast(want === "vpc" ? "Add a VPC first: every other block lives in one." : kind === "ec2" ? "An instance lives in a subnet: add a subnet first." : "A NAT Gateway lives in a (public) subnet: add a subnet first."); return; }
     }
     api.designAdd(design, kind, parent).then((l) => { apply(l); if (l.id) setSelectId(l.id); }).catch((e) => toast(errText(e)));
   }, [design, parentKind, selectId, apply, toast, setSelectId]);
@@ -223,8 +224,13 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
         <button className="pal" style={{ borderColor: COLORS.igw }} onClick={() => add("igw")}>Internet Gateway<small>one per VPC</small></button>
         <button className="pal" style={{ borderColor: COLORS.nat }} onClick={() => add("nat")}>NAT Gateway<small>in a public subnet, ≈ USD 32 / month</small></button>
         <button className="pal" style={{ borderColor: COLORS.rt }} onClick={() => add("rt")}>Route table<small>subnet → table → gateway</small></button>
+        <h4>Security</h4>
+        <button className="pal" style={{ borderColor: COLORS.sg }} onClick={() => add("sg")}>Security group<small>arrows between groups = allowed traffic</small></button>
+        <button className="pal" style={{ borderColor: COLORS.cidr }} onClick={() => add("cidr")}>Address range<small>the internet, your office IP</small></button>
+        <h4>Compute</h4>
+        <button className="pal" style={{ borderColor: COLORS.ec2 }} onClick={() => add("ec2")}>EC2 instance<small>cheapest type by default, no public IP</small></button>
         <h4>Arrows</h4>
-        <p className="small muted" style={{ margin: "4px 0" }}>Drag from a subnet's handle to a route table (the subnet uses it), and from a route table to a gateway (a route; set its destination in the inspector).</p>
+        <p className="small muted" style={{ margin: "4px 0" }}>Subnet → route table: the subnet uses it. Route table → gateway: a route. Group or range → group: the target lets that traffic in (ports in the inspector).</p>
         <h4>Layout</h4>
         <button className="pal" style={{ borderColor: "#999" }} onClick={() => api.designArrange(design).then(apply).then(() => window.setTimeout(() => rf.fitView({ padding: 0.15, duration: 300 }), 60)).catch((e) => toast(errText(e)))}>Arrange<small>AZ columns × tier rows (⇧⌘A)</small></button>
         <button className="pal" style={{ borderColor: "#999" }} onClick={() => rf.fitView({ padding: 0.15, duration: 300 })}>Fit to window<small>⇧⌘F</small></button>
@@ -257,6 +263,24 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
                 <div className="small muted">public: a route to the Internet Gateway · private: out through a NAT Gateway · isolated: no way out</div>
               </>}
               {selected.kind === "rt" && <div className="small muted">Routes are the arrows leaving this table. Select an arrow to change its destination; the VPC's local route is always there.</div>}
+              {selected.kind === "cidr" && <label>Range<input value={String(selected.params.cidr ?? "")} onChange={(e) => setParam(selected.id, "cidr", e.target.value)} placeholder="0.0.0.0/0 = anywhere" /></label>}
+              {selected.kind === "sg" && <>
+                <label>Egress (traffic out)<select value={String(selected.params.egress ?? "all")} onChange={(e) => setParam(selected.id, "egress", e.target.value, false)}>
+                  <option value="all">all: everything out (AWS's default)</option><option value="rules">rules: only the arrows leaving this group</option></select></label>
+                <label>Description<input value={String(selected.params.description ?? "")} onChange={(e) => setParam(selected.id, "description", e.target.value)} /></label>
+                <div className="small muted">Rules are the arrows: an arrow into this group lets that traffic in from its source; select an arrow to set the protocol and ports.</div>
+              </>}
+              {selected.kind === "ec2" && <>
+                <label>Instance type<select value={String(selected.params.type ?? "t4g.micro")} onChange={(e) => setParam(selected.id, "type", e.target.value, false)}>
+                  {st.instance_types.map((t) => { const h = design.region === "us-east-1" ? t.us_east_1 : design.region === "ap-south-1" ? t.ap_south_1 : t.us_east_1 * 1.1; return <option key={t.type} value={t.type}>{t.type} · {t.vcpu} vCPU · {t.memory} GiB · {t.arch} · USD {(h * 730).toFixed(0)}/month</option>; })}</select></label>
+                <label>Operating system<select value={String(selected.params.os ?? "al2023")} onChange={(e) => setParam(selected.id, "os", e.target.value, false)}>{st.os.map((o) => <option key={o.key} value={o.key}>{o.title}</option>)}</select></label>
+                <label>Key pair (an existing EC2 key pair name; empty = none, use SSM)<input value={String(selected.params.key ?? "")} onChange={(e) => setParam(selected.id, "key", e.target.value)} /></label>
+                <label className="inline"><input type="checkbox" checked={!!selected.params.public_ip} onChange={(e) => setParam(selected.id, "public_ip", e.target.checked, false)} />Public IPv4 address (USD 3.65 a month)</label>
+                <div>Security groups<div className="small muted">{design.nodes.filter((n) => n.kind === "sg" && n.parent === design.nodes.find((x) => x.id === selected.parent)?.parent).length === 0 && "none in this VPC yet: add one from the palette"}</div>
+                  {design.nodes.filter((n) => n.kind === "sg" && n.parent === design.nodes.find((x) => x.id === selected.parent)?.parent).map((g) => {
+                    const cur = Array.isArray(selected.params.sgs) ? (selected.params.sgs as string[]) : [];
+                    return <label key={g.id} className="inline"><input type="checkbox" checked={cur.includes(g.id)} onChange={(e) => setParam(selected.id, "sgs", e.target.checked ? [...cur, g.id] : cur.filter((x) => x !== g.id), false)} />{g.label}</label>; })}</div>
+              </>}
             </div>
             {problemsFor(result)}
             {result.info.length > 0 && <><h4>Facts</h4><ul className="info">{result.info.map((s, i) => <li key={i}>{s}</li>)}</ul></>}
@@ -267,11 +291,18 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
           </>
         ) : edge && edgeResult ? (
           <>
-            <h3>{edge.kind === "route" ? "Route" : "Attachment"}</h3>
+            <h3>{edge.kind === "route" ? "Route" : edge.kind === "traffic" ? "Traffic rule" : "Attachment"}</h3>
             <p className="small">{design.nodes.find((n) => n.id === edge.source)?.label} → {design.nodes.find((n) => n.id === edge.target)?.label}</p>
             {edge.kind === "route" && <div className="fields"><label>Destination<input value={String(edge.params.dest ?? "")} onChange={(e) => setEdgeDest(edge.id, e.target.value)} placeholder="0.0.0.0/0" /></label>
               <div className="small muted">0.0.0.0/0 = everything not inside the VPC (the internet)</div></div>}
             {edge.kind === "attach" && <p className="small muted">The subnet uses this route table. A subnet uses one table; a table can serve many subnets.</p>}
+            {edge.kind === "traffic" && <div className="fields">
+              <label>Protocol<select value={String(edge.params.proto ?? "tcp")} onChange={(e) => change({ ...design, edges: design.edges.map((x) => (x.id === edge.id ? { ...x, params: { ...x.params, proto: e.target.value } } : x)) })}>
+                <option value="tcp">tcp</option><option value="udp">udp</option><option value="icmp">icmp (ping)</option><option value="all">all traffic</option></select></label>
+              {(edge.params.proto === "tcp" || edge.params.proto === "udp" || !edge.params.proto) && <label>Ports<input value={String(edge.params.ports ?? "")} onChange={(e) => change({ ...design, edges: design.edges.map((x) => (x.id === edge.id ? { ...x, params: { ...x.params, ports: e.target.value } } : x)) }, true)} placeholder="443, 8080-8090, ssh, postgres, all" list="aib-ports" />
+                <datalist id="aib-ports">{st.ports.map((p) => <option key={p.name} value={p.name}>{p.port}</option>)}</datalist></label>}
+              <div className="small muted">{design.nodes.find((n) => n.id === edge.target)?.label} lets this traffic in from {design.nodes.find((n) => n.id === edge.source)?.label}; {design.nodes.find((n) => n.id === edge.source)?.label} lets it out (when its egress is "rules").</div>
+            </div>}
             {problemsFor(edgeResult)}
             <div className="row"><button className="danger small" onClick={() => onDelete({ nodes: [], edges: edges.filter((e) => e.id === edge.id) })}>Delete arrow</button></div>
           </>

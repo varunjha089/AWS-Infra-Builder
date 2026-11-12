@@ -27,6 +27,8 @@ export interface AppState {
   version: string; project: ProjectInfo | null; projects: { path: string; exists: boolean; name: string }[]; projects_dir: string;
   templates: { key: string; title: string; about: string }[]; regions: { id: string; name: string; azs: number }[];
   kinds: { kind: string; title: string; parent: string }[]; tiers: string[];
+  instance_types: { type: string; vcpu: number; memory: number; arch: string; us_east_1: number; ap_south_1: number }[];
+  os: { key: string; title: string }[]; ports: { name: string; port: number }[];
 }
 
 export const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
