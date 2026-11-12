@@ -1,0 +1,11 @@
+target/
+node_modules/
+web/dist/
+app/src-tauri/gen/
+.DS_Store
+*.local.*
+# never commit user data, state or secrets
+*.tfstate
+*.tfstate.backup
+.terraform/
+*.pem
