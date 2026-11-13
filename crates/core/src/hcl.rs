@@ -98,7 +98,7 @@ pub fn generate(d: &Design) -> Files {
                 let target = match t.kind.as_str() {
                     "igw" => format!("gateway_id             = aws_internet_gateway.{}.id", t.label),
                     "nat" => format!("nat_gateway_id         = aws_nat_gateway.{}.id", t.label),
-                    _ => continue,
+                    _ => continue, // a gateway endpoint adds its own routes (route_table_ids)
                 };
                 m.push_str(&format!("\nresource \"aws_route\" \"{}_{i}\" {{\n  route_table_id         = aws_route_table.{}.id\n  destination_cidr_block = {}\n  {target}\n}}\n", rt.label, rt.label, q(e.params.get("dest").and_then(|v| v.as_str()).unwrap_or("0.0.0.0/0"))));
             }
@@ -124,6 +124,18 @@ pub fn generate(d: &Design) -> Files {
                 m.push_str(&format!("\n# {}: everything out (AWS's default; the provider removes it unless it is written down)\nresource \"aws_vpc_security_group_egress_rule\" \"{}_out_all\" {{\n  security_group_id = aws_security_group.{}.id\n  ip_protocol       = \"-1\"\n  cidr_ipv4         = \"0.0.0.0/0\"\n}}\n", g.label, g.label, g.label));
             }
         }
+        for ep in kids.iter().filter(|n| n.kind == "vpce") {
+            let svc = p(ep, "service");
+            if crate::model::endpoint_type(svc) == Some("gateway") {
+                let tables: Vec<String> = d.edges.iter().filter(|e| e.kind == "route" && e.target == ep.id).filter_map(|e| d.node(&e.source)).map(|t| format!("aws_route_table.{}.id", t.label)).collect();
+                m.push_str(&format!("\n# gateway endpoint {} for {} (free): the route tables get a route to the service's prefix list\nresource \"aws_vpc_endpoint\" \"{}\" {{\n  vpc_id            = aws_vpc.{}.id\n  service_name      = \"com.amazonaws.${{var.region}}.{svc}\"\n  vpc_endpoint_type = \"Gateway\"\n  route_table_ids   = [{}]\n{}}}\n", ep.label, svc, ep.label, v.label, tables.join(", "), tags(ep, &[])));
+            } else {
+                let tier = p(ep, "tier");
+                let subs: Vec<String> = kids.iter().filter(|n| n.kind == "subnet" && p(n, "tier") == tier).map(|s| format!("aws_subnet.{}.id", s.label)).collect();
+                let sg = d.node(p(ep, "sg")).map(|g| format!("  security_group_ids  = [aws_security_group.{}.id]\n", g.label)).unwrap_or_default();
+                m.push_str(&format!("\n# interface endpoint {} for {} (one interface per {tier} subnet, USD 0.01/h each)\nresource \"aws_vpc_endpoint\" \"{}\" {{\n  vpc_id              = aws_vpc.{}.id\n  service_name        = \"com.amazonaws.${{var.region}}.{svc}\"\n  vpc_endpoint_type   = \"Interface\"\n  subnet_ids          = [{}]\n{sg}  private_dns_enabled = true\n{}}}\n", ep.label, svc, ep.label, v.label, subs.join(", "), tags(ep, &[])));
+            }
+        }
         for n in kids.iter().filter(|n| n.kind == "ec2") {
             let t = p(n, "type");
             let arch = instance_type(t).map(|x| x.3).unwrap_or("x86_64");
@@ -137,6 +149,29 @@ pub fn generate(d: &Design) -> Files {
             m.push_str(&format!("\n# instance {} ({t}{}, about USD {monthly:.0} a month running)\nresource \"aws_instance\" \"{}\" {{\n  ami                         = data.aws_ami.{ami}.id\n  instance_type               = {}\n  subnet_id                   = aws_subnet.{sub}.id\n  vpc_security_group_ids      = [{}]\n  associate_public_ip_address = {public}\n{}{}  root_block_device {{\n    volume_type = \"gp3\"\n    volume_size = {disk}\n  }}\n  metadata_options {{\n    http_tokens = \"required\"\n  }}\n{}}}\n",
                 n.label, if spot { ", spot" } else { "" }, n.label, q(t), sgs.join(", "), if p(n, "key").trim().is_empty() { String::new() } else { "  key_name                    = var.key_name\n".to_string() },
                 if spot { "  # spot: about 70 % cheaper; stopped (not terminated) when AWS takes the capacity back, so the volume and the work on it stay\n  instance_market_options {\n    market_type = \"spot\"\n    spot_options {\n      spot_instance_type             = \"persistent\"\n      instance_interruption_behavior = \"stop\"\n    }\n  }\n".to_string() } else { String::new() }, tags(n, &[])));
+        }
+    }
+
+    for b in d.nodes.iter().filter(|n| n.kind == "s3") {
+        let life = p(b, "lifecycle");
+        let expire = b.params.get("expire_days").and_then(|x| x.as_u64()).unwrap_or(0);
+        m.push_str(&format!("\n# ---- S3 bucket {} (public access blocked, encrypted; AWS adds a unique suffix to the name)\nresource \"aws_s3_bucket\" \"{}\" {{\n  bucket_prefix = \"${{var.project}}-{}-\"\n{}}}\n\nresource \"aws_s3_bucket_public_access_block\" \"{}\" {{\n  bucket                  = aws_s3_bucket.{}.id\n  block_public_acls       = true\n  block_public_policy     = true\n  ignore_public_acls      = true\n  restrict_public_buckets = true\n}}\n\nresource \"aws_s3_bucket_server_side_encryption_configuration\" \"{}\" {{\n  bucket = aws_s3_bucket.{}.id\n  rule {{\n    apply_server_side_encryption_by_default {{\n      sse_algorithm = \"AES256\"\n    }}\n  }}\n}}\n",
+            b.label, b.label, b.label.replace('_', "-"), tags(b, &[]), b.label, b.label, b.label, b.label));
+        if b.params.get("versioning").and_then(|x| x.as_bool()).unwrap_or(false) {
+            m.push_str(&format!("\nresource \"aws_s3_bucket_versioning\" \"{}\" {{\n  bucket = aws_s3_bucket.{}.id\n  versioning_configuration {{\n    status = \"Enabled\"\n  }}\n}}\n", b.label, b.label));
+        }
+        if life != "none" || expire > 0 {
+            let mut rule = String::new();
+            if life == "ia-30" || life == "ia-30-glacier-90" {
+                rule.push_str("    transition {\n      days          = 30\n      storage_class = \"STANDARD_IA\"\n    }\n");
+            }
+            if life == "glacier-90" || life == "ia-30-glacier-90" {
+                rule.push_str("    transition {\n      days          = 90\n      storage_class = \"GLACIER_IR\"\n    }\n");
+            }
+            if expire > 0 {
+                rule.push_str(&format!("    expiration {{\n      days = {expire}\n    }}\n"));
+            }
+            m.push_str(&format!("\n# {}: older objects move to cheaper storage\nresource \"aws_s3_bucket_lifecycle_configuration\" \"{}\" {{\n  bucket = aws_s3_bucket.{}.id\n  rule {{\n    id     = \"age\"\n    status = \"Enabled\"\n    filter {{}}\n{rule}  }}\n}}\n", b.label, b.label, b.label));
         }
     }
 
@@ -166,6 +201,9 @@ pub fn generate(d: &Design) -> Files {
     }
     for n in d.nodes.iter().filter(|n| n.kind == "nat") {
         o.push_str(&format!("\noutput \"nat_{}_public_ip\" {{\n  value = aws_eip.{}.public_ip\n}}\n", n.label, n.label));
+    }
+    for b in d.nodes.iter().filter(|n| n.kind == "s3") {
+        o.push_str(&format!("\noutput \"bucket_{}\" {{\n  value = aws_s3_bucket.{}.bucket\n}}\n", b.label, b.label));
     }
     for n in d.nodes.iter().filter(|n| n.kind == "ec2") {
         let public = n.params.get("public_ip").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -254,6 +292,15 @@ mod tests {
         assert!(m.contains("ip_protocol       = \"udp\"") && m.contains("from_port         = 53"));
         assert!(!m.contains("a_out_all"));
         assert_eq!(slug("My  Web App!"), "my-web-app");
+        let d = crate::dsl::parse("vpc main 10.0.0.0/16\nsubnet a private 10.0.0.0/24 az a in main rt t\nrt t in main: pl-s3 -> s3_ep\nvpce s3_ep s3 in main\nvpce ssm_ep ssm in main tier private sg eps\nsg eps in main\ns3 data gb 100 versioning lifecycle ia-30-glacier-90 expire 365\n", None).unwrap();
+        let f = generate(&d);
+        let m = &f["main.tf"];
+        assert!(m.contains("vpc_endpoint_type = \"Gateway\"") && m.contains("route_table_ids   = [aws_route_table.t.id]"), "{m}");
+        assert!(!m.contains("resource \"aws_route\" \"t_0\""), "the endpoint writes its own route");
+        assert!(m.contains("vpc_endpoint_type   = \"Interface\"") && m.contains("subnet_ids          = [aws_subnet.a.id]") && m.contains("security_group_ids  = [aws_security_group.eps.id]"));
+        assert!(m.contains("bucket_prefix = \"${var.project}-data-\"") && m.contains("block_public_acls       = true") && m.contains("sse_algorithm = \"AES256\""));
+        assert!(m.contains("storage_class = \"STANDARD_IA\"") && m.contains("storage_class = \"GLACIER_IR\"") && m.contains("days = 365") && m.contains("status = \"Enabled\""));
+        assert!(f["outputs.tf"].contains("bucket_data"));
     }
 
     /// `tofu init` + `tofu validate` on every template: needs OpenTofu on PATH and the internet (the provider is downloaded once),

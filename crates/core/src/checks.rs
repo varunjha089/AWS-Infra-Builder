@@ -230,7 +230,7 @@ pub fn analyse(d: &Design) -> Analysis {
                 match tier {
                     "public" if !to_igw => cx.error(&s.id, format!("Marked public, but route table {} has no 0.0.0.0/0 → Internet Gateway. Add that route, or mark the subnet private.", rt.label)),
                     "private" if to_igw => cx.error(&s.id, format!("Marked private, but route table {} sends 0.0.0.0/0 to an Internet Gateway: that makes it public. Route to a NAT Gateway instead, or mark the subnet public.", rt.label)),
-                    "private" if !to_nat => cx.warn(&s.id, format!("Marked private, but route table {} has no 0.0.0.0/0 → NAT Gateway: instances cannot reach the internet. Add the route, or mark the subnet isolated.", rt.label)),
+                    "private" if !to_nat => cx.warn(&s.id, format!("Marked private, but route table {} has no 0.0.0.0/0 → NAT Gateway: instances cannot reach the internet{}. Add the route, or mark the subnet isolated.", rt.label, if routes.iter().any(|(_, t)| t.kind == "vpce") { " (only the endpoint's service)" } else { "" })),
                     "isolated" if to_igw || to_nat => cx.error(&s.id, format!("Marked isolated, but route table {} has a default route to the internet. Remove it, or mark the subnet private/public.", rt.label)),
                     _ => {}
                 }
@@ -289,6 +289,16 @@ pub fn analyse(d: &Design) -> Analysis {
         let mut dests: Vec<String> = vec![];
         for e in &routes {
             let dest = ep(e, "dest").trim().to_string();
+            let to_endpoint = d.node(&e.target).map(|t| t.kind == "vpce").unwrap_or(false);
+            if to_endpoint {
+                if !dest.starts_with("pl-") {
+                    cx.error(&e.id, format!("A route to a VPC endpoint goes to the service's prefix list, written pl-<service> (here pl-{}), not to {dest}.", d.node(&e.target).map(|t| p(t, "service")).unwrap_or("s3")));
+                }
+                if d.node(&e.target).map(|t| crate::model::endpoint_type(p(t, "service")) != Some("gateway")).unwrap_or(false) {
+                    cx.error(&e.id, "Only gateway endpoints (S3, DynamoDB) are routed to. An interface endpoint is reached by DNS from the subnets of its tier; delete this arrow.");
+                }
+                continue;
+            }
             match Cidr::parse(&dest) {
                 Err(err) => cx.error(&e.id, format!("Destination: {err}.")),
                 Ok(c) => {
@@ -436,6 +446,53 @@ pub fn analyse(d: &Design) -> Analysis {
         info.entry(n.id.clone()).or_default().push(format!("Security groups: {}", if sgs.is_empty() { "none (the VPC's default)".to_string() } else { sgs.iter().map(|g| g.label.clone()).collect::<Vec<_>>().join(", ") }));
     }
 
+    // ---- VPC endpoints
+    for ep_node in d.nodes.iter().filter(|n| n.kind == "vpce") {
+        let svc = p(ep_node, "service");
+        match crate::model::endpoint_type(svc) {
+            None => cx.error(&ep_node.id, format!("\"{svc}\" is not a service the app knows. Choose one in the inspector.")),
+            Some("gateway") => {
+                let tables: Vec<&Node> = d.edges.iter().filter(|e| e.kind == "route" && e.target == ep_node.id).filter_map(|e| d.node(&e.source)).collect();
+                if tables.is_empty() {
+                    cx.warn(&ep_node.id, format!("No route table routes to this endpoint: nothing uses it. Draw an arrow from a route table to it (destination pl-{svc})."));
+                }
+                info.entry(ep_node.id.clone()).or_default().push(format!("Gateway endpoint for {}: free, no data charge. Subnets of {} reach {} privately, without a NAT Gateway.", svc.to_uppercase(), if tables.is_empty() { "no table".to_string() } else { tables.iter().map(|t| t.label.clone()).collect::<Vec<_>>().join(", ") }, svc.to_uppercase()));
+                summary.insert(ep_node.id.clone(), format!("{} gateway · free · {} table{}", svc.to_uppercase(), tables.len(), if tables.len() == 1 { "" } else { "s" }));
+            }
+            Some(_) => {
+                let tier = p(ep_node, "tier");
+                let subs: Vec<&Node> = ep_node.parent.as_ref().map(|v| d.children(v)).unwrap_or_default().into_iter().filter(|n| n.kind == "subnet" && p(n, "tier") == tier).collect();
+                if subs.is_empty() {
+                    cx.error(&ep_node.id, format!("No {tier} subnet in this VPC to put the endpoint's interface in. Choose another tier, or add a subnet."));
+                }
+                if p(ep_node, "sg").is_empty() || d.node(p(ep_node, "sg")).is_none() {
+                    cx.warn(&ep_node.id, "No security group: AWS uses the VPC's default group, which may not allow HTTPS (443) from the subnets. Make a group that lets 443 in from the VPC's range and choose it here.");
+                }
+                let monthly = subs.len() as f64 * crate::pricing::INTERFACE_ENDPOINT_HOURLY * crate::pricing::HOURS;
+                info.entry(ep_node.id.clone()).or_default().push(format!("Interface endpoint for {svc}: one network interface per {tier} subnet ({}), USD {:.3}/h each = USD {monthly:.2} a month, plus USD 0.01 per GB.", subs.len(), crate::pricing::INTERFACE_ENDPOINT_HOURLY));
+                if svc.starts_with("ssm") || svc == "ec2messages" {
+                    info.entry(ep_node.id.clone()).or_default().push("Session Manager needs all three: ssm, ssmmessages and ec2messages.".into());
+                }
+                summary.insert(ep_node.id.clone(), format!("{svc} · {} AZ{} · USD {monthly:.0}/month", subs.len(), if subs.len() == 1 { "" } else { "s" }));
+            }
+        }
+    }
+
+    // ---- S3 buckets
+    for b in d.nodes.iter().filter(|n| n.kind == "s3") {
+        let gb = b.params.get("gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let life = p(b, "lifecycle");
+        info.entry(b.id.clone()).or_default().push("Public access blocked and server-side encryption on (both free); the bucket's name gets a unique suffix from AWS.".into());
+        info.entry(b.id.clone()).or_default().push(format!("Storage: {gb:.0} GB × USD 0.023 = USD {:.2} a month in Standard{}", gb * 0.023, match life { "ia-30" => "; objects older than 30 days move to Infrequent Access (USD 0.0125/GB)".to_string(), "glacier-90" => "; older than 90 days to Glacier Instant Retrieval (USD 0.004/GB)".to_string(), "ia-30-glacier-90" => "; 30 days → Infrequent Access, 90 days → Glacier".to_string(), _ => String::new() }));
+        if gb >= 50.0 && life == "none" {
+            cx.warn(&b.id, "No lifecycle rule: everything stays in Standard storage for ever. Moving objects older than 30 days to Infrequent Access costs about half; Glacier a fifth.");
+        }
+        if b.params.get("versioning").and_then(|v| v.as_bool()).unwrap_or(false) && b.params.get("expire_days").and_then(|v| v.as_u64()).unwrap_or(0) == 0 {
+            info.entry(b.id.clone()).or_default().push("Versioning keeps every overwritten and deleted object (and charges for it); an expire rule bounds that.".into());
+        }
+        summary.insert(b.id.clone(), format!("{gb:.0} GB · USD {:.2}/month{}", crate::pricing::s3_monthly(b), if life != "none" { format!(" · {life}") } else { String::new() }));
+    }
+
     // ---- arrows between the wrong kinds (made by hand in the file)
     let mut edge_results = vec![];
     for e in &d.edges {
@@ -444,7 +501,7 @@ pub fn analyse(d: &Design) -> Analysis {
             continue;
         };
         if edge_kind(&s.kind, &t.kind) != Some(e.kind.as_str()) {
-            cx.error(&e.id, format!("An arrow from a {} to a {} means nothing here. Subnets attach to route tables; route tables route to gateways; security groups and address ranges carry traffic.", title(&s.kind), title(&t.kind)));
+            cx.error(&e.id, format!("An arrow from a {} to a {} means nothing here. Subnets attach to route tables; route tables route to gateways and gateway endpoints; security groups and address ranges carry traffic.", title(&s.kind), title(&t.kind)));
         }
         if e.kind == "route" && s.parent != t.parent.as_ref().and_then(|pid| d.node(pid)).and_then(|n| if n.kind == "subnet" { n.parent.clone() } else { Some(n.id.clone()) }) {
             cx.error(&e.id, format!("{} and {} are in different VPCs: a route table can only route to gateways of its own VPC.", s.label, t.label));

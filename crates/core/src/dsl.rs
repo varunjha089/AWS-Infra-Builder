@@ -16,6 +16,9 @@
 //! sg     db    in main egress rules                         # egress only what the rules say
 //! ec2    web_1 t4g.micro in pub_a sg web key mykey public os al2023
 //! cidr   internet 0.0.0.0/0                                 # an address range outside the design
+//! vpce   s3_ep s3 in main                                   # a gateway endpoint (route tables route pl-s3 -> s3_ep)
+//! vpce   ssm_ep ssm in main tier private sg endpoints       # an interface endpoint in the private subnets
+//! s3     data gb 50 lifecycle ia-30                         # a bucket (public access blocked, encrypted)
 //! rule   internet -> web tcp 443                            # traffic: the target lets it in from the source
 //! rule   web -> db tcp postgres
 //! ```
@@ -145,7 +148,7 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
         let mut i = 0;
         while i < rest.len() {
             match rest[i] {
-                "in" | "az" | "rt" | "sg" | "key" | "os" | "egress" => {
+                "in" | "az" | "rt" | "sg" | "key" | "os" | "egress" | "tier" | "gb" | "lifecycle" | "expire" => {
                     let Some(v) = rest.get(i + 1) else {
                         errors.push(err(ln, format!("`{}` needs a value after it", rest[i])));
                         break;
@@ -154,7 +157,28 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                         "in" => l.parent = Some(v.to_string()),
                         "az" => { l.params.insert("az".into(), json!(v)); }
                         "rt" => l.rt = Some(v.to_string()),
+                        "sg" if kw == "vpce" => l.sgs = vec![v.to_string()],
                         "sg" => l.sgs = v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
+                        "tier" => {
+                            if !TIERS.contains(v) {
+                                errors.push(err(ln, format!("tier: public, private or isolated, not \"{v}\"")));
+                            }
+                            l.params.insert("tier".into(), json!(v));
+                        }
+                        "gb" => match v.parse::<f64>() {
+                            Ok(g) if g >= 0.0 => { l.params.insert("gb".into(), json!(g)); }
+                            _ => errors.push(err(ln, "gb: the expected amount stored, in GB, such as `gb 50`")),
+                        },
+                        "lifecycle" => {
+                            if !["none", "ia-30", "glacier-90", "ia-30-glacier-90"].contains(v) {
+                                errors.push(err(ln, "lifecycle: none, ia-30 (Infrequent Access after 30 days), glacier-90, or ia-30-glacier-90"));
+                            }
+                            l.params.insert("lifecycle".into(), json!(v));
+                        }
+                        "expire" => match v.parse::<u64>() {
+                            Ok(d) => { l.params.insert("expire_days".into(), json!(d)); }
+                            _ => errors.push(err(ln, "expire: delete objects after this many days, such as `expire 365`")),
+                        },
                         "key" => { l.params.insert("key".into(), json!(v)); }
                         "os" => { l.params.insert("os".into(), json!(v)); }
                         _ => {
@@ -168,6 +192,10 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                 }
                 "public" if kw == "ec2" => {
                     l.params.insert("public_ip".into(), json!(true));
+                    rest.remove(i);
+                }
+                "versioning" if kw == "s3" => {
+                    l.params.insert("versioning".into(), json!(true));
                     rest.remove(i);
                 }
                 "spot" if kw == "ec2" => {
@@ -216,6 +244,25 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                 }
                 _ => errors.push(err(ln, "ec2: `ec2 <name> <type> in <subnet> [sg <group,group>] [key <key pair>] [public] [spot] [disk <GiB>] [os al2023|ubuntu|debian]`")),
             },
+            "vpce" => match positional.as_slice() {
+                [svc] => {
+                    if crate::model::endpoint_type(svc).is_none() {
+                        errors.push(err(ln, format!("vpce: \"{svc}\" is not a service the app knows ({})", crate::model::ENDPOINT_SERVICES.iter().map(|e| e.0).collect::<Vec<_>>().join(", "))));
+                    }
+                    l.params.insert("service".into(), json!(svc));
+                    l.params.entry("tier").or_insert(json!("private"));
+                    l.params.entry("sg").or_insert(json!(""));
+                }
+                _ => errors.push(err(ln, "vpce: `vpce <name> <service> in <vpc> [tier <tier>] [sg <group>]`, such as `vpce s3_ep s3 in main`")),
+            },
+            "s3" => {
+                for (k, v) in [("versioning", json!(false)), ("lifecycle", json!("none")), ("expire_days", json!(0)), ("gb", json!(10))] {
+                    l.params.entry(k).or_insert(v);
+                }
+                if !positional.is_empty() {
+                    errors.push(err(ln, format!("s3: unexpected \"{}\"; the form is `s3 <name> [gb <GB>] [versioning] [lifecycle none|ia-30|glacier-90|ia-30-glacier-90] [expire <days>]`", positional.join(" "))));
+                }
+            }
             "cidr" => match positional.as_slice() {
                 [c] => { l.params.insert("cidr".into(), json!(c)); }
                 _ => errors.push(err(ln, "cidr: `cidr <name> <range>`, such as `cidr internet 0.0.0.0/0`")),
@@ -323,6 +370,10 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
             let sgs: Vec<String> = l.sgs.iter().map(|g| ids[g].clone()).collect();
             d.node_mut(&id).unwrap().params.insert("sgs".into(), json!(sgs));
         }
+        if l.kind == "vpce" {
+            let sg = l.sgs.first().map(|g| ids[g].clone()).unwrap_or_default();
+            d.node_mut(&id).unwrap().params.insert("sg".into(), json!(sg));
+        }
     }
     let mut en: u64 = base.map(|b| b.next_edge_id()[1..].parse().unwrap_or(1)).unwrap_or(1);
     let mut edge_id = |base_edge: Option<&Edge>| match base_edge {
@@ -397,6 +448,22 @@ pub fn print(d: &Design) -> String {
         match n.kind.as_str() {
             "vpc" => format!("vpc {} {}{place}", n.label, p(n, "cidr")),
             "cidr" => format!("cidr {} {}", n.label, p(n, "cidr")),
+            "vpce" => {
+                let mut s = format!("vpce {} {}{place}", n.label, p(n, "service"));
+                if crate::model::endpoint_type(&p(n, "service")) == Some("interface") {
+                    s.push_str(&format!(" tier {}", p(n, "tier")));
+                    if !p(n, "sg").is_empty() { s.push_str(&format!(" sg {}", label(&p(n, "sg")))); }
+                }
+                s
+            }
+            "s3" => {
+                let mut s = format!("s3 {}", n.label);
+                if let Some(g) = n.params.get("gb").and_then(|v| v.as_f64()).filter(|g| *g != 10.0) { s.push_str(&format!(" gb {g}")); }
+                if n.params.get("versioning").and_then(|v| v.as_bool()).unwrap_or(false) { s.push_str(" versioning"); }
+                if !p(n, "lifecycle").is_empty() && p(n, "lifecycle") != "none" { s.push_str(&format!(" lifecycle {}", p(n, "lifecycle"))); }
+                if let Some(e) = n.params.get("expire_days").and_then(|v| v.as_u64()).filter(|e| *e > 0) { s.push_str(&format!(" expire {e}")); }
+                s
+            }
             "sg" => format!("sg {}{place}{}", n.label, if p(n, "egress") == "rules" { " egress rules" } else { "" }),
             "ec2" => {
                 let sgs: Vec<String> = n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).map(label).collect()).unwrap_or_default();
@@ -424,7 +491,7 @@ pub fn print(d: &Design) -> String {
         out.push('\n');
         done.push(v.id.clone());
         let mut kids: Vec<&Node> = d.descendants(&v.id).iter().skip(1).filter_map(|id| d.node(id)).collect();
-        let rank = |n: &Node| match n.kind.as_str() { "igw" => 0, "subnet" => 1, "nat" => 2, "ec2" => 3, "rt" => 5, "sg" => 6, _ => 4 };
+        let rank = |n: &Node| match n.kind.as_str() { "igw" => 0, "subnet" => 1, "nat" => 2, "ec2" => 3, "rt" => 5, "sg" => 6, "vpce" => 7, _ => 4 };
         // route tables in the order of the tiers they serve (public first), so the text reads top-down like the canvas
         let rt_rank = |n: &Node| d.edges.iter().filter(|e| e.kind == "attach" && e.target == n.id).filter_map(|e| d.node(&e.source)).map(|s| tier_rank(&p(s, "tier"))).min().unwrap_or(99);
         kids.sort_by_key(|n| (rank(n), if n.kind == "rt" { rt_rank(n) } else { tier_rank(&p(n, "tier")) }, p(n, "az"), n.label.clone()));
@@ -474,6 +541,8 @@ pub fn help() -> Vec<(String, String)> {
         ("sg <name> in <vpc> [egress all|rules]".into(), "a security group; egress all = AWS's default, rules = only what the rules say".into()),
         ("ec2 <name> <type> in <subnet> [sg a,b] [key <pair>] [public] [spot] [disk <GiB>] [os al2023|ubuntu|debian]".into(), "an instance; public = a public IPv4 address (costs money); spot = about 70 % cheaper, may be interrupted".into()),
         ("cidr <name> <range>".into(), "an address range outside the design, such as `cidr internet 0.0.0.0/0`".into()),
+        ("vpce <name> <service> in <vpc> [tier <tier>] [sg <group>]".into(), "a VPC endpoint: s3 and dynamodb are free gateway endpoints (route `pl-s3 -> name` from a table); the rest are interface endpoints in the tier's subnets".into()),
+        ("s3 <name> [gb <GB>] [versioning] [lifecycle ia-30|glacier-90|ia-30-glacier-90] [expire <days>]".into(), "a bucket with public access blocked and encryption on; gb is for the estimate".into()),
         ("rule <from> -> <to> <tcp|udp|icmp|all> [port|range|name]".into(), "traffic the target lets in from the source (and the source lets out)".into()),
         ("# …".into(), "a comment".into()),
     ]

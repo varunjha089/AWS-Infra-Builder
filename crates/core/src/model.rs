@@ -87,7 +87,28 @@ pub const KINDS: &[(&str, &str, &str)] = &[
     ("sg", "Security group", "vpc"),
     ("ec2", "EC2 instance", "subnet"),
     ("cidr", "Address range", ""),
+    ("vpce", "VPC endpoint", "vpc"),
+    ("s3", "S3 bucket", ""),
 ];
+
+/// (service, title, "gateway" | "interface"): gateway endpoints are free and route through the route table; interface endpoints
+/// put a network interface in each subnet of a tier and cost per hour per AZ
+pub const ENDPOINT_SERVICES: &[(&str, &str, &str)] = &[
+    ("s3", "S3 (gateway, free)", "gateway"),
+    ("dynamodb", "DynamoDB (gateway, free)", "gateway"),
+    ("ssm", "SSM (Session Manager)", "interface"),
+    ("ssmmessages", "SSM messages (Session Manager)", "interface"),
+    ("ec2messages", "EC2 messages (Session Manager)", "interface"),
+    ("ecr.api", "ECR API (container images)", "interface"),
+    ("ecr.dkr", "ECR Docker (container images)", "interface"),
+    ("logs", "CloudWatch Logs", "interface"),
+    ("secretsmanager", "Secrets Manager", "interface"),
+    ("sts", "STS", "interface"),
+];
+
+pub fn endpoint_type(service: &str) -> Option<&'static str> {
+    ENDPOINT_SERVICES.iter().find(|e| e.0 == service).map(|e| e.2)
+}
 
 /// the common ports by name, for the arrow label and the checks
 pub const PORTS: &[(&str, u16)] = &[("ssh", 22), ("rdp", 3389), ("http", 80), ("https", 443), ("mysql", 3306), ("postgres", 5432), ("mssql", 1433), ("mongodb", 27017), ("redis", 6379)];
@@ -180,6 +201,10 @@ pub fn defaults(kind: &str) -> Params {
         // spot: about 70 % cheaper, may be interrupted (for work that can be stopped and resumed); disk: the root volume in GiB
         "ec2" => json!({"type": "t4g.micro", "os": "al2023", "key": "", "public_ip": false, "sgs": [], "spot": false, "disk": 8}),
         "cidr" => json!({"cidr": "0.0.0.0/0"}),
+        // a gateway endpoint for S3 by default (free); interface endpoints name the tier whose subnets get the interfaces and a group
+        "vpce" => json!({"service": "s3", "tier": "private", "sg": ""}),
+        // public access blocked and encryption on always; `gb` is only for the estimate; lifecycle moves old objects to cheaper storage
+        "s3" => json!({"versioning": false, "lifecycle": "none", "expire_days": 0, "gb": 10}),
         _ => json!({}),
     };
     v.as_object().cloned().unwrap_or_default()
@@ -194,7 +219,7 @@ pub fn az_letters(azs: u8) -> Vec<String> {
 pub fn edge_kind(source: &str, target: &str) -> Option<&'static str> {
     match (source, target) {
         ("subnet", "rt") => Some("attach"),
-        ("rt", "igw") | ("rt", "nat") => Some("route"),
+        ("rt", "igw") | ("rt", "nat") | ("rt", "vpce") => Some("route"),
         ("sg", "sg") | ("sg", "cidr") | ("cidr", "sg") => Some("traffic"),
         _ => None,
     }
@@ -386,7 +411,10 @@ impl Design {
             return None;
         }
         let id = self.next_edge_id();
+        let target_kind = self.node(target).map(|n| n.kind.clone()).unwrap_or_default();
         let params = match kind {
+            // a route to a gateway endpoint goes to the service's prefix list, not to a CIDR
+            "route" if target_kind == "vpce" => json!({"dest": format!("pl-{}", self.param_str(target, "service"))}).as_object().cloned().unwrap_or_default(),
             "route" => json!({"dest": "0.0.0.0/0"}).as_object().cloned().unwrap_or_default(),
             "traffic" => json!({"proto": "tcp", "ports": "443"}).as_object().cloned().unwrap_or_default(),
             _ => Params::new(),

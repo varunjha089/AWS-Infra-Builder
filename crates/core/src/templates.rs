@@ -39,13 +39,13 @@ rt public in main: 0.0.0.0/0 -> igw\nrt app_a_rt in main: 0.0.0.0/0 -> nat_a\nrt
     Template {
         key: "three_tier",
         title: "Three-tier VPC (2 AZs, shared NAT)",
-        about: "Public, private and isolated tiers in two AZs. One NAT Gateway shared by both AZs saves about USD 32 a month; the app warns that AZ b depends on AZ a. The isolated tier (databases) has no route to the internet at all.",
+        about: "Public, private and isolated tiers in two AZs. One NAT Gateway shared by both AZs saves about USD 32 a month; the app warns that AZ b depends on AZ a. The isolated tier (databases) has no route to the internet, but reaches S3 through a free gateway endpoint (backups without a NAT).",
         text: "net \"Three-tier VPC\"\nregion ap-south-1\nazs 2\n\nvpc main 10.0.0.0/16\nigw igw in main\n\
 subnet public_a public 10.0.0.0/20 az a in main rt public\nsubnet public_b public 10.0.16.0/20 az b in main rt public\n\
 subnet app_a private 10.0.32.0/20 az a in main rt app\nsubnet app_b private 10.0.48.0/20 az b in main rt app\n\
 subnet db_a isolated 10.0.64.0/24 az a in main rt db\nsubnet db_b isolated 10.0.65.0/24 az b in main rt db\n\
 nat nat_a in public_a\n\
-rt public in main: 0.0.0.0/0 -> igw\nrt app in main: 0.0.0.0/0 -> nat_a\nrt db in main\n",
+rt public in main: 0.0.0.0/0 -> igw\nrt app in main: 0.0.0.0/0 -> nat_a\nrt db in main: pl-s3 -> s3_ep\nvpce s3_ep s3 in main\n",
     },
     Template {
         key: "gpu_box",

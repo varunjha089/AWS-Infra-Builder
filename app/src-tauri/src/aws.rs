@@ -2,7 +2,7 @@
 //! profile in ~/.aws (the SDK reads the files and handles SSO) or from the keys pasted into the app (handed to the SDK for one
 //! call at a time; they live in the keychain, see main.rs). Only Describe* and GetCallerIdentity are ever called here.
 
-use aib_core::import::{InstanceInfo, Inventory, NatInfo, PermInfo, RouteInfo, RouteTableInfo, SgInfo, SubnetInfo, VpcInfo};
+use aib_core::import::{EndpointInfo, InstanceInfo, Inventory, NatInfo, PermInfo, RouteInfo, RouteTableInfo, SgInfo, SubnetInfo, VpcInfo};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_ec2::types::Filter;
 use serde::Serialize;
@@ -149,7 +149,13 @@ pub async fn inventory(creds: Creds, region: &str, vpc_id: &str, account: &str) 
                 }
             }
         }
-        Ok(Inventory { region: region.into(), account: account.into(), vpc, subnets, igws, nats, route_tables, sgs, instances })
+        let eps = ec2.describe_vpc_endpoints().filters(by_vpc("vpc-id")).send().await.map_err(readable)?;
+        let endpoints = eps.vpc_endpoints().iter().map(|e| EndpointInfo {
+            id: e.vpc_endpoint_id().unwrap_or("").into(), name: name_tag(e.tags()), service_name: e.service_name().unwrap_or("").into(),
+            endpoint_type: e.vpc_endpoint_type().map(|t| t.as_str().to_string()).unwrap_or_default(),
+            route_table_ids: e.route_table_ids().to_vec(), subnet_ids: e.subnet_ids().to_vec(), sg_ids: e.groups().iter().filter_map(|g| g.group_id()).map(String::from).collect(),
+        }).collect();
+        Ok(Inventory { region: region.into(), account: account.into(), vpc, subnets, igws, nats, route_tables, sgs, instances, endpoints })
     }).await
 }
 

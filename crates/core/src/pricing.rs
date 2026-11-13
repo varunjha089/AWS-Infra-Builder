@@ -47,6 +47,21 @@ pub const ROOT_VOLUME_MONTHLY: f64 = 8.0 * 0.08;
 pub const GP3_PER_GIB: f64 = 0.08;
 /// what a Spot instance costs against on-demand, as a typical share (the real price moves; the Costs tab says so)
 pub const SPOT_FACTOR: f64 = 0.3;
+/// an interface endpoint's network interface, per hour per AZ (plus USD 0.01 per GB)
+pub const INTERFACE_ENDPOINT_HOURLY: f64 = 0.01;
+
+/// a bucket's storage a month from its expected GB and lifecycle (Standard 0.023, Infrequent Access 0.0125, Glacier Instant 0.004 per GB)
+pub fn s3_monthly(n: &crate::model::Node) -> f64 {
+    let gb = n.params.get("gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let per_gb = match n.params.get("lifecycle").and_then(|v| v.as_str()).unwrap_or("none") {
+        // most of a growing bucket is old: take two thirds as moved to the cheaper class
+        "ia-30" => 0.023 / 3.0 + 0.0125 * 2.0 / 3.0,
+        "glacier-90" => 0.023 / 3.0 + 0.004 * 2.0 / 3.0,
+        "ia-30-glacier-90" => 0.023 / 3.0 + 0.0125 / 3.0 + 0.004 / 3.0,
+        _ => 0.023,
+    };
+    gb * per_gb
+}
 
 /// on-demand price of an instance type: the table has us-east-1 and ap-south-1; other regions are taken as us-east-1 × 1.1
 pub fn instance_hourly(t: &str, region: &str) -> f64 {
@@ -97,6 +112,7 @@ pub fn cost(d: &Design) -> CostReport {
     let mut items = vec![];
     let mut advice = vec![];
     let free = |kind: &str| matches!(kind, "vpc" | "subnet" | "igw" | "rt" | "sg" | "cidr");
+    let tier_subnets = |vpc: &Option<String>, tier: &str| d.nodes.iter().filter(|s| s.kind == "subnet" && s.parent == *vpc && s.params.get("tier").and_then(|v| v.as_str()) == Some(tier)).count();
     let mut public_ips = 0;
     let mut x86: Vec<(String, &str, f64)> = vec![];
     for n in &d.nodes {
@@ -107,6 +123,20 @@ pub fn cost(d: &Design) -> CostReport {
             let monthly = nat_h * HOURS;
             items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
                 note: format!("{nat_h} USD/h × {HOURS:.0} h = {} a month, plus {} per GB processed", money(monthly), money(nat_per_gb(&region))) });
+        }
+        if n.kind == "vpce" {
+            let svc = n.params.get("service").and_then(|v| v.as_str()).unwrap_or("");
+            if crate::model::endpoint_type(svc) == Some("interface") {
+                let azs = tier_subnets(&n.parent, n.params.get("tier").and_then(|v| v.as_str()).unwrap_or("private"));
+                let monthly = azs as f64 * INTERFACE_ENDPOINT_HOURLY * HOURS;
+                items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
+                    note: format!("{svc} interface endpoint: {azs} interface{} × {INTERFACE_ENDPOINT_HOURLY} USD/h × {HOURS:.0} h = {}, plus USD 0.01 per GB", if azs == 1 { "" } else { "s" }, money(monthly)) });
+            }
+        }
+        if n.kind == "s3" {
+            let monthly = s3_monthly(n);
+            items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
+                note: format!("{:.0} GB stored ({}): {} a month; requests and transfer out are extra", n.params.get("gb").and_then(|v| v.as_f64()).unwrap_or(0.0), n.params.get("lifecycle").and_then(|v| v.as_str()).unwrap_or("none"), money(monthly)) });
         }
         if n.kind == "ec2" {
             let t = n.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -164,8 +194,15 @@ pub fn cost(d: &Design) -> CostReport {
         }
         advice.push("For a lab that is used by day only, destroy the NAT Gateways at night and recreate them in the morning: the cost is per hour (the \"Tear down for the night\" action comes with plan/apply).".into());
     }
-    if nats.is_empty() && instances == 0 && d.nodes.iter().any(|n| n.kind == "subnet") {
-        advice.push("No NAT Gateway and no instance: this network costs nothing a month by itself. VPCs, subnets, Internet Gateways, route tables and security groups are free; only what runs inside them costs money.".into());
+    if nats.is_empty() && instances == 0 && d.nodes.iter().any(|n| n.kind == "subnet") && d.nodes.iter().all(|n| n.kind != "vpce" || crate::model::endpoint_type(n.params.get("service").and_then(|v| v.as_str()).unwrap_or("")) == Some("gateway")) {
+        advice.push("No NAT Gateway and no instance: this network costs nothing a month by itself. VPCs, subnets, Internet Gateways, route tables, security groups and gateway endpoints are free; only what runs inside them costs money.".into());
+    }
+    let interface_eps = d.nodes.iter().filter(|n| n.kind == "vpce" && crate::model::endpoint_type(n.params.get("service").and_then(|v| v.as_str()).unwrap_or("")) == Some("interface")).count();
+    if interface_eps >= 3 && nats.is_empty() {
+        advice.push(format!("{interface_eps} interface endpoints cost about {} a month together. That is still less than one NAT Gateway ({}), and the traffic stays inside AWS; a NAT only wins when many services are needed.", money(items.iter().filter(|i| i.kind == "vpce").map(|i| i.monthly).sum::<f64>()), money(nat_month)));
+    }
+    if d.nodes.iter().any(|n| n.kind == "s3" && n.params.get("lifecycle").and_then(|v| v.as_str()) == Some("none") && n.params.get("gb").and_then(|v| v.as_f64()).unwrap_or(0.0) >= 50.0) {
+        advice.push("Buckets without a lifecycle rule keep everything in Standard storage. A rule that moves objects older than 30 days to Infrequent Access halves that part of the bill; Glacier Instant Retrieval cuts it to a fifth.".into());
     }
     CostReport {
         items,
@@ -204,6 +241,18 @@ mod tests {
         assert!((instance_hourly("t3.micro", "eu-west-1") - 0.0104 * 1.1).abs() < 1e-9);
         assert_eq!(arm_equivalent("t3.small"), Some("t4g.small"));
         assert_eq!(arm_equivalent("g4dn.xlarge"), None);
+    }
+
+    #[test]
+    fn endpoints_and_buckets() {
+        let d = crate::dsl::parse("vpc main 10.0.0.0/16\nsubnet a private 10.0.0.0/24 az a in main\nsubnet b private 10.0.1.0/24 az b in main\nvpce s3_ep s3 in main\nvpce ssm_ep ssm in main tier private\ns3 data gb 100\ns3 logs gb 100 lifecycle glacier-90\n", None).unwrap();
+        let c = cost(&d);
+        let item = |l: &str| c.items.iter().find(|i| i.label == l).map(|i| i.monthly).unwrap_or(-1.0);
+        assert_eq!(item("s3_ep"), -1.0, "gateway endpoints are free and not listed");
+        assert!((item("ssm_ep") - 2.0 * 0.01 * 730.0).abs() < 0.01, "{}", item("ssm_ep"));
+        assert!((item("data") - 2.3).abs() < 0.01);
+        assert!(item("logs") < 1.2, "{}", item("logs"));
+        assert!(c.advice.iter().any(|a| a.contains("lifecycle rule")));
     }
 
     #[test]

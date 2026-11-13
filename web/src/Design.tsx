@@ -10,7 +10,7 @@ import { api, errText, type Analysis, type AppState, type DNode, type Design, ty
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
 import { neon, useTheme } from "./theme";
 
-export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569" };
+export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569", vpce: "#0f766e", s3: "#15803d" };
 const CONTAINER = (kind: string) => kind === "vpc" || kind === "subnet";
 
 type Data = { node: DNode; result?: NodeResult; azName: string; plan?: string; mark?: string };
@@ -52,7 +52,7 @@ function BlockNode({ data, selected }: NodeProps<Node<Data>>) {
   return (
     <div className={`block st-${st} ${selected ? "sel" : ""}`} style={{ "--c": color(n) } as CSSProperties}>
       {(n.kind === "rt" || n.kind === "sg" || n.kind === "cidr") && <Handle type="target" position={Position.Left} />}
-      {(n.kind === "igw" || n.kind === "nat") && <Handle type="target" position={Position.Top} />}
+      {(n.kind === "igw" || n.kind === "nat" || n.kind === "vpce") && <Handle type="target" position={Position.Top} />}
       {(data.plan || data.mark) && <span className={`ribbon act-${data.mark ?? data.plan}`}>{data.mark ?? data.plan}</span>}
       <div className="lh"><span>{r?.title ?? n.kind}{mark(st)}</span><span className="bl">{n.label}</span></div>
       <div className={`ls st-${st}`}>{st !== "ok" ? r?.messages[0] : r?.summary || ""}{n.params.aws_id ? <span className="awsid"> · {String(n.params.aws_id)}</span> : null}</div>
@@ -240,9 +240,12 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
         <button className="pal" style={pal("igw")} onClick={() => add("igw")}>Internet Gateway<small>one per VPC</small></button>
         <button className="pal" style={pal("nat")} onClick={() => add("nat")}>NAT Gateway<small>in a public subnet, ≈ USD 32 / month</small></button>
         <button className="pal" style={pal("rt")} onClick={() => add("rt")}>Route table<small>subnet → table → gateway</small></button>
+        <button className="pal" style={pal("vpce")} onClick={() => add("vpce")}>VPC endpoint<small>S3/DynamoDB free; reach AWS without a NAT</small></button>
         <h4>Security</h4>
         <button className="pal" style={pal("sg")} onClick={() => add("sg")}>Security group<small>arrows between groups = allowed traffic</small></button>
         <button className="pal" style={pal("cidr")} onClick={() => add("cidr")}>Address range<small>the internet, your office IP</small></button>
+        <h4>Data</h4>
+        <button className="pal" style={pal("s3")} onClick={() => add("s3")}>S3 bucket<small>public access blocked, encrypted</small></button>
         <h4>Compute</h4>
         <button className="pal" style={pal("ec2")} onClick={() => add("ec2")}>EC2 instance<small>cheapest type by default, no public IP</small></button>
         <h4>Arrows</h4>
@@ -283,6 +286,27 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
               </>}
               {selected.kind === "rt" && <div className="small muted">Routes are the arrows leaving this table. Select an arrow to change its destination; the VPC's local route is always there.</div>}
               {selected.kind === "cidr" && <label>Range<input value={String(selected.params.cidr ?? "")} onChange={(e) => setParam(selected.id, "cidr", e.target.value)} placeholder="0.0.0.0/0 = anywhere" /></label>}
+              {selected.kind === "vpce" && <>
+                <label>Service<select value={String(selected.params.service ?? "s3")} onChange={(e) => setParam(selected.id, "service", e.target.value, false)}>
+                  {st.endpoint_services.map((s) => <option key={s.service} value={s.service}>{s.title}</option>)}</select></label>
+                {st.endpoint_services.find((s) => s.service === selected.params.service)?.type === "gateway"
+                  ? <div className="small muted">Free. Draw an arrow from each route table whose subnets should reach the service; the route goes to the service's prefix list.</div>
+                  : <>
+                    <label>Tier whose subnets get an interface<select value={String(selected.params.tier ?? "private")} onChange={(e) => setParam(selected.id, "tier", e.target.value, false)}>{st.tiers.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
+                    <label>Security group (must let 443 in from the VPC)<select value={String(selected.params.sg ?? "")} onChange={(e) => setParam(selected.id, "sg", e.target.value, false)}>
+                      <option value="">none (the VPC's default group)</option>{design.nodes.filter((n) => n.kind === "sg" && n.parent === selected.parent).map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}</select></label>
+                    <div className="small muted">USD 0.01 an hour per subnet of the tier, plus USD 0.01 per GB; still far cheaper than a NAT Gateway for a few services.</div>
+                  </>}
+              </>}
+              {selected.kind === "s3" && <>
+                <label>Expected storage (GB, for the estimate)<input type="number" min={0} value={Number(selected.params.gb ?? 10)} onChange={(e) => setParam(selected.id, "gb", Math.max(0, Number(e.target.value) || 0))} /></label>
+                <label>Lifecycle (older objects to cheaper storage)<select value={String(selected.params.lifecycle ?? "none")} onChange={(e) => setParam(selected.id, "lifecycle", e.target.value, false)}>
+                  <option value="none">none: Standard for ever (USD 0.023/GB)</option><option value="ia-30">after 30 days → Infrequent Access (USD 0.0125/GB)</option>
+                  <option value="glacier-90">after 90 days → Glacier Instant (USD 0.004/GB)</option><option value="ia-30-glacier-90">30 days → IA, 90 days → Glacier</option></select></label>
+                <label>Delete objects after (days; 0 = never)<input type="number" min={0} value={Number(selected.params.expire_days ?? 0)} onChange={(e) => setParam(selected.id, "expire_days", Math.max(0, Number(e.target.value) || 0))} /></label>
+                <label className="inline"><input type="checkbox" checked={!!selected.params.versioning} onChange={(e) => setParam(selected.id, "versioning", e.target.checked, false)} />Versioning (keeps overwritten objects; costs storage)</label>
+                <div className="small muted">Public access is always blocked and encryption always on; both are free.</div>
+              </>}
               {selected.kind === "sg" && <>
                 <label>Egress (traffic out)<select value={String(selected.params.egress ?? "all")} onChange={(e) => setParam(selected.id, "egress", e.target.value, false)}>
                   <option value="all">all: everything out (AWS's default)</option><option value="rules">rules: only the arrows leaving this group</option></select></label>

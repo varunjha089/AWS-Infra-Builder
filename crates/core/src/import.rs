@@ -104,6 +104,21 @@ pub struct Inventory {
     pub sgs: Vec<SgInfo>,
     #[serde(default)]
     pub instances: Vec<InstanceInfo>,
+    #[serde(default)]
+    pub endpoints: Vec<EndpointInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EndpointInfo {
+    pub id: String,
+    pub name: Option<String>,
+    /// "com.amazonaws.<region>.s3"
+    pub service_name: String,
+    /// "Gateway" | "Interface"
+    pub endpoint_type: String,
+    pub route_table_ids: Vec<String>,
+    pub subnet_ids: Vec<String>,
+    pub sg_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -298,6 +313,30 @@ pub fn to_design(inv: &Inventory) -> Imported {
             notes.push(format!("Instance {} is stopped: it costs only its volume and public address until started.", i.name.clone().unwrap_or(i.id.clone())));
         }
     }
+    // VPC endpoints: gateway ones get a route arrow from each table; interface ones take the tier of their first subnet
+    let rt_nodes: HashMap<String, String> = d.nodes.iter().filter(|n| n.kind == "rt").filter_map(|n| Some((n.params.get("aws_id")?.as_str()?.to_string(), n.id.clone()))).collect();
+    let rt_node_of = |rt_id: &str| rt_nodes.get(rt_id).cloned();
+    for epi in &inv.endpoints {
+        let svc = epi.service_name.rsplit('.').next().unwrap_or("").to_string();
+        let svc = if epi.service_name.ends_with(".ecr.api") { "ecr.api".to_string() } else if epi.service_name.ends_with(".ecr.dkr") { "ecr.dkr".to_string() } else { svc };
+        if crate::model::endpoint_type(&svc).is_none() {
+            notes.push(format!("VPC endpoint {} ({}) is for a service the canvas does not know; left out.", epi.id, epi.service_name));
+            continue;
+        }
+        let tier = epi.subnet_ids.first().and_then(|s| subnet_node.get(s)).and_then(|n| d.node(n)).and_then(|n| n.params.get("tier").and_then(|v| v.as_str()).map(String::from)).unwrap_or_else(|| "private".into());
+        let sg = epi.sg_ids.first().and_then(|g| sg_node.get(g)).cloned().unwrap_or_default();
+        let nid = id();
+        d.nodes.push(Node { id: nid.clone(), kind: "vpce".into(), label: unique(label_for(&epi.name, &epi.id, &format!("{}_ep", svc.replace('.', "_")))),
+            params: obj(json!({"service": svc, "tier": tier, "sg": sg, "aws_id": epi.id})), parent: Some(vpc_id.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+        if epi.endpoint_type.eq_ignore_ascii_case("gateway") {
+            for rt in &epi.route_table_ids {
+                if let Some(src) = rt_node_of(rt) {
+                    d.edges.push(Edge { id: format!("e{en}"), source: src, target: nid.clone(), kind: "route".into(), params: obj(json!({"dest": format!("pl-{svc}")})) });
+                    en += 1;
+                }
+            }
+        }
+    }
     arrange(&mut d);
     crate::dsl::sync(&mut d);
     notes.insert(0, format!("Imported read-only from account {} in {}: {} subnets, {} Internet Gateway{}, {} NAT Gateway{}, {} route tables, {} security groups, {} instances. Nothing in the account was changed.",
@@ -347,6 +386,10 @@ mod tests {
                 InstanceInfo { id: "i-2".into(), name: None, instance_type: "x9.odd".into(), subnet_id: "subnet-3".into(), sgs: vec!["sg-db".into()], public_ip: false, key: None, state: "stopped".into(), image_name: None, spot: false, disk: None },
                 InstanceInfo { id: "i-3".into(), name: None, instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec![], public_ip: false, key: None, state: "terminated".into(), image_name: None, spot: false, disk: None },
             ],
+            endpoints: vec![
+                EndpointInfo { id: "vpce-1".into(), name: Some("s3 endpoint".into()), service_name: "com.amazonaws.ap-south-1.s3".into(), endpoint_type: "Gateway".into(), route_table_ids: vec!["rtb-app".into()], subnet_ids: vec![], sg_ids: vec![] },
+                EndpointInfo { id: "vpce-2".into(), name: None, service_name: "com.amazonaws.ap-south-1.ssm".into(), endpoint_type: "Interface".into(), route_table_ids: vec![], subnet_ids: vec!["subnet-3".into()], sg_ids: vec!["sg-db".into()] },
+            ],
             route_tables: vec![
                 RouteTableInfo { id: "rtb-main".into(), name: None, main: true, subnet_ids: vec![], routes: vec![RouteInfo { dest: "10.0.0.0/16".into(), target: "local".into(), state: "active".into() }] },
                 RouteTableInfo { id: "rtb-pub".into(), name: Some("public".into()), main: false, subnet_ids: vec!["subnet-1".into(), "subnet-2".into()],
@@ -375,7 +418,7 @@ mod tests {
         // route tables: public, app, and the main one (db uses it implicitly)
         assert_eq!(d.nodes.iter().filter(|n| n.kind == "rt").count(), 3);
         assert_eq!(d.edges.iter().filter(|e| e.kind == "attach").count(), 4);
-        assert_eq!(d.edges.iter().filter(|e| e.kind == "route").count(), 2, "the peering route is left out with a note");
+        assert_eq!(d.edges.iter().filter(|e| e.kind == "route").count(), 3, "igw, nat and the S3 endpoint; the peering route is left out with a note");
         assert!(im.notes.iter().any(|n| n.contains("pcx-1")));
         assert!(im.notes.iter().any(|n| n.contains("main table")));
         assert!(im.notes[0].contains("123456789012"));
@@ -397,6 +440,8 @@ mod tests {
         assert!(im.notes.iter().any(|n| n.contains("x9.odd")));
         assert!(im.notes.iter().any(|n| n.contains("is stopped")));
         assert!(d.text.as_ref().unwrap().contains("rule internet -> web tcp 443"), "{}", d.text.as_ref().unwrap());
+        assert!(d.text.as_ref().unwrap().contains("rt app in prod_vpc: 0.0.0.0/0 -> nat_a, pl-s3 -> s3_endpoint"), "{}", d.text.as_ref().unwrap());
+        assert!(d.text.as_ref().unwrap().contains("vpce ssm_ep_2 ssm in prod_vpc tier private sg prod_db"), "{}", d.text.as_ref().unwrap());
         let a = analyse(d);
         // the unknown type is an error on its block; everything else is fine
         assert_eq!(a.errors, 1, "{:?}", a.problems);
