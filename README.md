@@ -24,6 +24,11 @@ Apply after seeing the plan, and the Costs tab tells you beforehand what they co
   fold a group into one whose rules contain its own, saying what its instances would newly let in; combine the `launch-wizard-N`
   groups the console makes one per launch into one group with the union of their rules, listing per group what that opens. Made for
   an imported account that grew by clicking "Launch instance".
+- **Fix buttons:** every problem the app can repair has one, on the block or arrow and in the inspector's list: write the network
+  address, use the next free block, attach or complete the public route table, mark the tier the routes say, delete what nothing uses,
+  the nearest known instance type, Graviton for the same size, the public IP off (or on, with its price), the scaling group's sizes,
+  a lifecycle rule. "Fix all safe ones" runs those that cost nothing and open nothing. "Allow SSH only from my current address" looks
+  your public IP up (checkip.amazonaws.com) and puts it in an Address range block, leaving the web ports open as they were.
 - **Checks on every block:** VPC and subnet CIDRs between /16 and /28, inside the VPC, not overlapping; usable addresses shown as
   `2^(32−24) = 256 − 5 = 251`; a public subnet must route `0.0.0.0/0` to the Internet Gateway, a private one to a NAT Gateway, an
   isolated one nowhere; a NAT Gateway must be in a public subnet; a private subnet whose NAT is in another AZ gets a warning; one

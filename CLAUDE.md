@@ -4,12 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.5.1 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.5.2 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
 Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
 (nothing overlaps; `layout.rs`) and the Tidy-up recommendations (merge groups with the same rules, fold a group into the one
-whose rules contain its own, combine the launch-wizard groups, delete unused groups and ranges; `tidy.rs`).
+whose rules contain its own, combine the launch-wizard groups, delete unused groups and ranges; `tidy.rs`). 0.5.2: Fix buttons
+(`fix.rs`): every problem the checks can repair has one, "Fix all safe ones" runs those that cost and open nothing; "allow SSH only
+from my address" looks the owner's address up at checkip.amazonaws.com.
 Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
@@ -32,7 +34,7 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            counts; PORTS by name; ENDPOINT_SERVICES (gateway | interface); ec2/asg params type, os, key, public_ip, sgs, spot, disk
                            (+ asg: tier, min, max, desired); alb params scheme, tier, sg, port, cert, health; s3 params gb, versioning, lifecycle,
                            expire_days; vpce params service, tier, sg;
-                           INSTANCE_TYPES (vCPU, GiB, arch, USD/h us-east-1 and ap-south-1); OS (AMI owner + name pattern); parse_ports,
+                           INSTANCE_TYPES (vCPU, GiB, arch, USD/h us-east-1 and ap-south-1; t2 and t3.nano included for imports); OS (AMI owner + name pattern); parse_ports,
                            traffic_label; add() (next free CIDR, balanced AZ; ec2 defaults to t4g.micro, no public IP), connect() (edge_kind
                            decides; a traffic arrow = the target's ingress and the source's egress), remove() (with contents), ensure_labels(),
                            arrange() = layout::arrange
@@ -49,6 +51,13 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            -> combine into one "servers" (the union; widens per group). apply(design, rec): members' sgs/sg switch to
                            the kept group, arrows move over once each, egress "all" if any folded group had it, the rest deleted.
                            Analysis.recommendations carries the list; the app re-finds a recommendation by id before applying
+  fix.rs                   Fix {id "<kind>:<target>", kind, target (block or arrow), target_label, title (the button), note, safe, needs_ip};
+                           fixes(design) mirrors the conditions of checks.rs: network_cidr, propose_cidr (next free block), route_to_igw
+                           (reuse a public table of the VPC or add one, add the route), tier (mark public/private), delete (extra IGW,
+                           unused range, unused group; "default" only from the design), egress_rules, my_ip (a risky port open to
+                           0.0.0.0/0 -> the arrow's source becomes an Address range "my_ip" <ip>/32), type (nearest_type: same size in
+                           a family of the same letter, else t3.micro; GPU families -> g4dn.xlarge), graviton, public_ip_off/on,
+                           asg_sizes, lifecycle. apply(design, fix, my_ip); apply_all_safe() re-lists after each. Analysis.fixes
   cidr.rs                  Cidr: parse, contains, overlaps, usable (size − 5), is_private, next_free (aligned); random-input test
   checks.rs                analyse(&Design) -> Analysis {nodes: NodeResult{status, messages, info, summary}, edges, problems, ok, counts, az_spread,
                            az_names, cost}. Every rule has a message that says what to change. Non-network CIDRs are errors (AWS and the provider
@@ -103,7 +112,7 @@ app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sd
                            inventory() (VPC, subnets, IGWs, NATs, route tables, security groups, instances, AMI names) with a 60 s timeout
                            and readable errors. Only Describe* and GetCallerIdentity. One real test (`#[ignore]`, AWS_INFRA_BUILDER_REAL=1 with
                            the default profile) prints the account's first VPC as .aib.
-app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load, save_design, design_from_text, design_arrange(sizes), design_tidy(id, sizes), design_add,
+app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load, save_design, design_from_text, design_arrange(sizes), design_tidy(id, sizes), design_fix(id | all_safe, sizes; my_ip() via ureq when the fix needs it; lays out again when blocks came or went), design_add,
                            design_connect, design_remove, text_help, code, export_code, pick_folder, open_url; tofu_status, tofu_install,
                            tofu_plan(destroy), tofu_apply(confirm, accept_budget) (guarded_ctx: live identity, account guard against
                            project.json "aws".account set by the first plan, region guard, budget guard), job_status(since),
@@ -118,7 +127,8 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
                            drop re-parents by geometry (dropTarget); palette; inspector (label, params, Propose free CIDR, instance type with
                            price, OS, key pair, public IP, group ticks, egress mode, rule protocol/ports, facts, problems). With nothing
                            selected: the design's name/region/AZs, the summary, the cost, "Tidy up" (Analysis.recommendations with a
-                           button each -> design_tidy, then the layout again) and the problems. Arrange (button, ⇧⌘A through the
+                           button each -> design_tidy, then the layout again), the problems and "Fixes" (Analysis.fixes, a Fix button
+                           each and "Fix all safe ones" -> design_fix); a selected block or arrow shows its own fixes under its problems. Arrange (button, ⇧⌘A through the
                            "aib-arrange" event) sends the measured block sizes (rf.getNodes().measured). Colours: COLORS by day,
                            neon(COLORS) at night through --c (useColor)
   CodeTab.tsx              main.tf / variables.tf / outputs.tf from `code`, Copy, Export… (pick a folder)

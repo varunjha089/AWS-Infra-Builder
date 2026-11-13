@@ -7,6 +7,7 @@ pub mod checks;
 pub mod cidr;
 pub mod creds;
 pub mod dsl;
+pub mod fix;
 pub mod hcl;
 pub mod import;
 pub mod layout;

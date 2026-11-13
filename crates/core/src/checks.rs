@@ -50,6 +50,9 @@ pub struct Analysis {
     /// what would tidy the design (merge or delete security groups and ranges), biggest first; see `tidy.rs`
     #[serde(default)]
     pub recommendations: Vec<crate::tidy::Recommendation>,
+    /// what the app can repair at a click, one per fixable problem (plus the Graviton saving); see `fix.rs`
+    #[serde(default)]
+    pub fixes: Vec<crate::fix::Fix>,
     /// what the design costs a month while idle, and how to pay less
     pub cost: CostReport,
 }
@@ -666,7 +669,7 @@ pub fn analyse(d: &Design) -> Analysis {
     let mut azs: Vec<&str> = d.nodes.iter().filter(|n| n.kind == "subnet").map(|n| p(n, "az")).collect();
     azs.sort_unstable();
     azs.dedup();
-    Analysis { nodes, edges: edge_results, problems, ok: errors == 0, errors, warnings, counts, az_spread: azs.len(), az_names, recommendations: crate::tidy::recommend(d), cost: pricing::cost(d) }
+    Analysis { nodes, edges: edge_results, problems, ok: errors == 0, errors, warnings, counts, az_spread: azs.len(), az_names, recommendations: crate::tidy::recommend(d), fixes: crate::fix::fixes(d), cost: pricing::cost(d) }
 }
 
 #[cfg(test)]

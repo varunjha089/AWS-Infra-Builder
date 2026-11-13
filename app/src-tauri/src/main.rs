@@ -183,6 +183,35 @@ fn design_arrange(st: State<'_, App>, mut design: Design, sizes: Option<aib_core
     save_design(st, design)
 }
 
+/// one fix by its id, or every safe one (`all_safe`); the layout runs again when blocks came or went
+#[tauri::command]
+fn design_fix(st: State<'_, App>, mut design: Design, id: Option<String>, all_safe: bool, sizes: Option<aib_core::layout::Sizes>) -> R<Value> {
+    let blocks = design.nodes.len();
+    let mut done = 0;
+    if all_safe {
+        done += aib_core::fix::apply_all_safe(&mut design);
+    }
+    if let Some(id) = id {
+        let f = aib_core::fix::fixes(&design).into_iter().find(|f| f.id == id).ok_or_else(|| "The design changed since that fix was offered; look at the list again.".to_string())?;
+        let ip = if f.needs_ip { Some(my_ip()?) } else { None };
+        aib_core::fix::apply(&mut design, &f, ip.as_deref())?;
+        done += 1;
+    }
+    if design.nodes.len() != blocks {
+        aib_core::layout::arrange_with(&mut design, &sizes.unwrap_or_default());
+    }
+    let l = save_design(st, design)?;
+    Ok(json!({"design": l.design, "analysis": l.analysis, "done": done}))
+}
+
+/// the owner's public IPv4 address, from AWS's own check service (free, no account needed)
+fn my_ip() -> R<String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(8))).build().into();
+    let s = agent.get("https://checkip.amazonaws.com").call().map_err(|e| format!("Your public address could not be looked up ({e}). Add an Address range block with it by hand."))?
+        .into_body().read_to_string().map_err(|e| e.to_string())?;
+    Ok(s.trim().to_string())
+}
+
 /// carry out one of the analysis's recommendations (by its id), then lay the design out again
 #[tauri::command]
 fn design_tidy(st: State<'_, App>, mut design: Design, id: String, sizes: Option<aib_core::layout::Sizes>) -> R<Loaded> {
@@ -639,7 +668,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             app_state, project_new, project_open, project_from_template, project_save_as, project_close, project_forget, set_projects_dir, pick_folder,
-            project_load, save_design, design_from_text, design_arrange, design_tidy, design_add, design_connect, design_remove, text_help, code, export_code, open_url,
+            project_load, save_design, design_from_text, design_arrange, design_tidy, design_fix, design_add, design_connect, design_remove, text_help, code, export_code, open_url,
             aws_state, aws_set_keys, aws_clear_keys, aws_select, aws_test, aws_list_vpcs, aws_import,
             tofu_status, tofu_install, tofu_plan, tofu_apply, job_status, project_set_budget, design_set_aws_ids
         ])

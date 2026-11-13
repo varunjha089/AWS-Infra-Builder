@@ -218,6 +218,14 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
     window.addEventListener("aib-arrange", arrange);
     return () => window.removeEventListener("aib-arrange", arrange);
   }, [arrange]);
+  const fixIt = useCallback((id: string | null, allSafe: boolean) => {
+    api.designFix(design, id, allSafe, measured()).then((l) => { apply(l); toast(allSafe ? `${l.done} fixed. ⌘Z undoes it.` : "Fixed. ⌘Z undoes it."); }).catch((e) => toast(errText(e)));
+  }, [design, measured, apply, toast]);
+  /** the fixes for one block or arrow, as buttons */
+  const fixesFor = (target: string) => {
+    const fs = analysis.fixes.filter((f) => f.target === target);
+    return fs.length > 0 ? <div className="fixes">{fs.map((f) => <div key={f.id} className="fix"><button className="small primary" onClick={() => fixIt(f.id, false)}>{f.title}</button>{f.note && <span className="small muted"> {f.note}</span>}</div>)}</div> : null;
+  };
   const tidy = useCallback((id: string) => {
     api.designTidy(design, id, measured()).then((l) => { apply(l); setSelectId(null); toast("Done. The design was laid out again; ⌘Z undoes it."); }).catch((e) => toast(errText(e)));
   }, [design, measured, apply, toast, setSelectId]);
@@ -371,6 +379,7 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
               </>}
             </div>
             {problemsFor(result)}
+            {fixesFor(selected.id)}
             {result.info.length > 0 && <><h4>Facts</h4><ul className="info">{result.info.map((s, i) => <li key={i}>{s}</li>)}</ul></>}
             {selected.kind === "subnet" && (() => { const c = parseCidr(String(selected.params.cidr ?? "")); return c ? <p className="small muted">{cidrText(c)} → {size(c).toLocaleString()} − 5 = {(size(c) - 5).toLocaleString()} usable</p> : null; })()}
             <h4>Lives in</h4>
@@ -394,6 +403,7 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
               <div className="small muted">{design.nodes.find((n) => n.id === edge.target)?.label} lets this traffic in from {design.nodes.find((n) => n.id === edge.source)?.label}; {design.nodes.find((n) => n.id === edge.source)?.label} lets it out (when its egress is "rules").</div>
             </div>}
             {problemsFor(edgeResult)}
+            {fixesFor(edge.id)}
             <div className="row"><button className="danger small" onClick={() => onDelete({ nodes: [], edges: edges.filter((e) => e.id === edge.id) })}>Delete arrow</button></div>
           </>
         ) : (
@@ -422,6 +432,14 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
             <h4>Problems</h4>
             {analysis.problems.length === 0 ? <p className="st-ok">None: every CIDR fits, every subnet routes as its tier says.</p>
               : <ul className="problems">{analysis.problems.map((m, i) => <li key={i} className={analysis.errors && i < analysis.errors ? "" : ""}>{m}</li>)}</ul>}
+            {analysis.fixes.length > 0 && <>
+              <h4>Fixes <span className="pill">{analysis.fixes.length}</span>{analysis.fixes.some((f) => f.safe) && <button className="small primary" style={{ marginLeft: 8 }} onClick={() => fixIt(null, true)}>Fix all safe ones ({analysis.fixes.filter((f) => f.safe).length})</button>}</h4>
+              <ul className="fixes">{analysis.fixes.map((f) => <li key={f.id} className={f.safe ? "safe" : ""}>
+                <div className="row" style={{ margin: 0, justifyContent: "space-between" }}><span><strong>{f.target_label}</strong>: {f.title}</span><button className="small" onClick={() => fixIt(f.id, false)}>Fix</button></div>
+                {f.note && <div className="small muted">{f.note}</div>}
+              </li>)}</ul>
+              <p className="small muted">Safe = costs nothing, opens nothing, needs nothing looked up. The others (a public IP, a narrower egress, Graviton, your own address) are one click each.</p>
+            </>}
             <p className="small muted">Click a block or an arrow to change it. Red = AWS would refuse it or the design contradicts itself; yellow = works but probably not what you want.</p>
           </>
         )}

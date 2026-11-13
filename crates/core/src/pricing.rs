@@ -81,7 +81,7 @@ pub fn instance_hourly(t: &str, region: &str) -> f64 {
 /// the Graviton (arm64) type of the same size as an x86 type, if the table has one
 pub fn arm_equivalent(t: &str) -> Option<&'static str> {
     let (family, size) = t.split_once('.')?;
-    let arm_family = match family { "t3" => "t4g", "m5" => "m6g", "c5" => "c6g", "r5" => "r6g", _ => return None };
+    let arm_family = match family { "t2" | "t3" => "t4g", "m5" => "m6g", "c5" => "c6g", "r5" => "r6g", _ => return None };
     let want = format!("{arm_family}.{size}");
     INSTANCE_TYPES.iter().find(|i| i.0 == want).map(|i| i.0)
 }
