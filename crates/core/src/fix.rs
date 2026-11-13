@@ -440,6 +440,13 @@ mod template_tests {
         let r = a.nodes.iter().find(|n| n.id == d.by_label("box").unwrap().id).unwrap();
         assert_eq!(r.status, "warn", "{:?}", r.messages);
         assert!(fixes(&d).iter().any(|f| f.kind == "type" && !f.safe));
+        // a typed root volume or hours outside AWS's range is said on the block, not forced in the field
+        let b = d.nodes.iter_mut().find(|n| n.label == "box").unwrap();
+        b.params.insert("disk".into(), serde_json::json!(2));
+        b.params.insert("hours".into(), serde_json::json!(900));
+        let a = checks::analyse(&d);
+        let r = a.nodes.iter().find(|n| n.id == d.by_label("box").unwrap().id).unwrap();
+        assert!(r.messages.iter().any(|m| m.contains("8 to 16384")) && r.messages.iter().any(|m| m.contains("outside 1 to 744")), "{:?}", r.messages);
     }
 
     #[test]

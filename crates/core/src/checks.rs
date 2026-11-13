@@ -421,6 +421,16 @@ pub fn analyse(d: &Design) -> Analysis {
                 }
             }
         }
+        // the values are the owner's to type; what AWS would refuse is said here
+        let disk = n.params.get("disk").and_then(|v| v.as_f64()).unwrap_or(8.0);
+        if !(8.0..=16384.0).contains(&disk) || disk.fract() != 0.0 {
+            cx.error(&n.id, format!("The root volume is {disk} GiB; AWS allows whole numbers from 8 to 16384 GiB (gp3)."));
+        }
+        if let Some(h) = n.params.get("hours").and_then(|v| v.as_f64()) {
+            if !(1.0..=744.0).contains(&h) {
+                cx.warn(&n.id, format!("{h} hours a month is outside 1 to 744 (a month has at most 744): the estimate uses 730 until it is changed."));
+            }
+        }
         // the image's own rules: architecture, the smallest root volume, what it is for
         let os = p(n, "os");
         if let Some(o) = crate::model::os_info(os) {
@@ -534,6 +544,18 @@ pub fn analyse(d: &Design) -> Analysis {
         let subs = tier_subnets(&g.parent, tier);
         let num = |k: &str, dflt: u64| g.params.get(k).and_then(|v| v.as_u64()).unwrap_or(dflt);
         let (min, max, desired) = (num("min", 1), num("max", 2), num("desired", 1));
+        if max < 1 {
+            cx.error(&g.id, format!("max is at least 1; here max {max}."));
+        }
+        let disk = g.params.get("disk").and_then(|v| v.as_f64()).unwrap_or(8.0);
+        if !(8.0..=16384.0).contains(&disk) || disk.fract() != 0.0 {
+            cx.error(&g.id, format!("The root volume is {disk} GiB; AWS allows whole numbers from 8 to 16384 GiB."));
+        }
+        if let Some(h) = g.params.get("hours").and_then(|v| v.as_f64()) {
+            if !(1.0..=744.0).contains(&h) {
+                cx.warn(&g.id, format!("{h} hours a month is outside 1 to 744: the estimate uses 730 until it is changed."));
+            }
+        }
         let t = p(g, "type");
         if subs.is_empty() {
             cx.error(&g.id, format!("No {tier} subnet in this VPC to launch into. Choose another tier, or add a subnet."));
@@ -606,6 +628,9 @@ pub fn analyse(d: &Design) -> Analysis {
         info.entry(b.id.clone()).or_default().push(format!("Storage: {gb:.0} GB × USD 0.023 = USD {:.2} a month in Standard{}", gb * 0.023, match life { "ia-30" => "; objects older than 30 days move to Infrequent Access (USD 0.0125/GB)".to_string(), "glacier-90" => "; older than 90 days to Glacier Instant Retrieval (USD 0.004/GB)".to_string(), "ia-30-glacier-90" => "; 30 days → Infrequent Access, 90 days → Glacier".to_string(), _ => String::new() }));
         if gb >= 50.0 && life == "none" {
             cx.warn(&b.id, "No lifecycle rule: everything stays in Standard storage for ever. Moving objects older than 30 days to Infrequent Access costs about half; Glacier a fifth.");
+        }
+        if b.params.get("gb").and_then(|v| v.as_f64()).unwrap_or(0.0) < 0.0 || b.params.get("expire_days").and_then(|v| v.as_f64()).unwrap_or(0.0) < 0.0 {
+            cx.error(&b.id, "Storage and expiry days cannot be negative.".to_string());
         }
         if b.params.get("versioning").and_then(|v| v.as_bool()).unwrap_or(false) && b.params.get("expire_days").and_then(|v| v.as_u64()).unwrap_or(0) == 0 {
             info.entry(b.id.clone()).or_default().push("Versioning keeps every overwritten and deleted object (and charges for it); an expire rule bounds that.".into());

@@ -8,6 +8,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { api, errText, type Sizes, type Analysis, type AppState, type DNode, type Design, type EdgeResult, type JobSnap, type Loaded, type NodeResult } from "./api";
 import { NewInstance, HOUR_PRESETS, hoursText, type Pick } from "./NewInstance";
+import { Num } from "./Num";
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
 import { neon, useTheme } from "./theme";
 
@@ -357,24 +358,24 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
                   {st.instance_types.map((t) => { const h = design.region === "us-east-1" ? t.us_east_1 : design.region === "ap-south-1" ? t.ap_south_1 : t.us_east_1 * 1.1; return <option key={t.type} value={t.type}>{t.type} · {t.vcpu} vCPU · {t.memory} GiB · USD {(h * 730).toFixed(0)}/month each</option>; })}</select></label>
                 <label>Tier (its subnets)<select value={String(selected.params.tier ?? "private")} onChange={(e) => setParam(selected.id, "tier", e.target.value, false)}>{st.tiers.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
                 <div className="row" style={{ margin: 0 }}>
-                  <label>Min<input type="number" min={0} style={{ width: 70 }} value={Number(selected.params.min ?? 1)} onChange={(e) => setParam(selected.id, "min", Math.max(0, Number(e.target.value) || 0))} /></label>
-                  <label>Desired<input type="number" min={0} style={{ width: 70 }} value={Number(selected.params.desired ?? 1)} onChange={(e) => setParam(selected.id, "desired", Math.max(0, Number(e.target.value) || 0))} /></label>
-                  <label>Max<input type="number" min={1} style={{ width: 70 }} value={Number(selected.params.max ?? 2)} onChange={(e) => setParam(selected.id, "max", Math.max(1, Number(e.target.value) || 1))} /></label>
+                  <label>Min<Num min={0} style={{ width: 70 }} value={Number(selected.params.min ?? 1)} onCommit={(v) => setParam(selected.id, "min", v)} /></label>
+                  <label>Desired<Num min={0} style={{ width: 70 }} value={Number(selected.params.desired ?? 1)} onCommit={(v) => setParam(selected.id, "desired", v)} /></label>
+                  <label>Max<Num min={1} style={{ width: 70 }} value={Number(selected.params.max ?? 2)} onCommit={(v) => setParam(selected.id, "max", v)} /></label>
                 </div>
                 <label>Operating system<select value={String(selected.params.os ?? "al2023")} onChange={(e) => setParam(selected.id, "os", e.target.value, false)}>{st.os.map((o) => <option key={o.key} value={o.key}>{o.title}</option>)}</select></label>
                 <label>Key pair (empty = none)<input value={String(selected.params.key ?? "")} onChange={(e) => setParam(selected.id, "key", e.target.value)} /></label>
                 <label className="inline"><input type="checkbox" checked={!!selected.params.spot} onChange={(e) => setParam(selected.id, "spot", e.target.checked, false)} />Spot (about 70 % cheaper; the group replaces interrupted instances)</label>
-                <label>Root volume (GiB)<input type="number" min={8} value={Number(selected.params.disk ?? 8)} onChange={(e) => setParam(selected.id, "disk", Math.max(8, Number(e.target.value) || 8))} /></label>
+                <label>Root volume (GiB)<Num min={8} value={Number(selected.params.disk ?? 8)} onCommit={(v) => setParam(selected.id, "disk", v)} /></label>
                 <div>Security groups{design.nodes.filter((n) => n.kind === "sg" && n.parent === selected.parent).map((g) => {
                   const cur = Array.isArray(selected.params.sgs) ? (selected.params.sgs as string[]) : [];
                   return <label key={g.id} className="inline"><input type="checkbox" checked={cur.includes(g.id)} onChange={(e) => setParam(selected.id, "sgs", e.target.checked ? [...cur, g.id] : cur.filter((x) => x !== g.id), false)} />{g.label}</label>; })}</div>
               </>}
               {selected.kind === "s3" && <>
-                <label>Expected storage (GB, for the estimate)<input type="number" min={0} value={Number(selected.params.gb ?? 10)} onChange={(e) => setParam(selected.id, "gb", Math.max(0, Number(e.target.value) || 0))} /></label>
+                <label>Expected storage (GB, for the estimate)<Num min={0} value={Number(selected.params.gb ?? 10)} onCommit={(v) => setParam(selected.id, "gb", v)} /></label>
                 <label>Lifecycle (older objects to cheaper storage)<select value={String(selected.params.lifecycle ?? "none")} onChange={(e) => setParam(selected.id, "lifecycle", e.target.value, false)}>
                   <option value="none">none: Standard for ever (USD 0.023/GB)</option><option value="ia-30">after 30 days → Infrequent Access (USD 0.0125/GB)</option>
                   <option value="glacier-90">after 90 days → Glacier Instant (USD 0.004/GB)</option><option value="ia-30-glacier-90">30 days → IA, 90 days → Glacier</option></select></label>
-                <label>Delete objects after (days; 0 = never)<input type="number" min={0} value={Number(selected.params.expire_days ?? 0)} onChange={(e) => setParam(selected.id, "expire_days", Math.max(0, Number(e.target.value) || 0))} /></label>
+                <label>Delete objects after (days; 0 = never)<Num min={0} value={Number(selected.params.expire_days ?? 0)} onCommit={(v) => setParam(selected.id, "expire_days", v)} /></label>
                 <label className="inline"><input type="checkbox" checked={!!selected.params.versioning} onChange={(e) => setParam(selected.id, "versioning", e.target.checked, false)} />Versioning (keeps overwritten objects; costs storage)</label>
                 <div className="small muted">Public access is always blocked and encryption always on; both are free.</div>
               </>}
@@ -395,7 +396,7 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
                     {HOUR_PRESETS.map(([v, t]) => <option key={v} value={v}>{t}</option>)}<option value="custom">custom…</option></select></label>
                   <button className="small" onClick={() => setNewInst("change")}>Recommend a type…</button>
                 </div>
-                {!HOUR_PRESETS.some(([v]) => v === Number(selected.params.hours ?? 730)) && <label>Hours (1 to 744)<input type="number" min={1} max={744} value={Number(selected.params.hours ?? 730)} onChange={(e) => setParam(selected.id, "hours", Math.max(1, Math.min(744, Number(e.target.value) || 1)))} /></label>}
+                {!HOUR_PRESETS.some(([v]) => v === Number(selected.params.hours ?? 730)) && <label>Hours (1 to 744)<Num min={1} max={744} value={Number(selected.params.hours ?? 730)} onCommit={(v) => setParam(selected.id, "hours", v)} /></label>}
                 <div className="small muted">{hoursText(Number(selected.params.hours ?? 730))}: stop the instance when it is not in use (only the volume is charged then), or the estimate will not hold.</div>
                 <label>Operating system<select value={String(selected.params.os ?? "al2023")} onChange={(e) => setParam(selected.id, "os", e.target.value, false)}>{st.os.map((o) => <option key={o.key} value={o.key}>{o.title}</option>)}</select></label>
                 {(() => { const o = st.os.find((x) => x.key === selected.params.os); return o?.note ? <div className="small muted">{o.title}: {o.note}.</div> : null; })()}
@@ -409,7 +410,7 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
                   <button className="small primary" onClick={() => window.dispatchEvent(new CustomEvent("aib-connect", { detail: selected.id }))}>Connect (SSH) →</button>
                   <span className="small muted">{selected.params.address ? `${selected.params.address}` : "in the Terminal tab; the address is known after Apply or an import"}</span>
                 </div>
-                <label>Root volume (GiB, USD 0.08 per GiB a month)<input type="number" min={8} max={16384} value={Number(selected.params.disk ?? 8)} onChange={(e) => setParam(selected.id, "disk", Math.max(8, Math.min(16384, Number(e.target.value) || 8)))} /></label>
+                <label>Root volume (GiB, USD 0.08 per GiB a month)<Num min={8} max={16384} value={Number(selected.params.disk ?? 8)} onCommit={(v) => setParam(selected.id, "disk", v)} /></label>
                 <div>Security groups<div className="small muted">{design.nodes.filter((n) => n.kind === "sg" && n.parent === design.nodes.find((x) => x.id === selected.parent)?.parent).length === 0 && "none in this VPC yet: add one from the palette"}</div>
                   {design.nodes.filter((n) => n.kind === "sg" && n.parent === design.nodes.find((x) => x.id === selected.parent)?.parent).map((g) => {
                     const cur = Array.isArray(selected.params.sgs) ? (selected.params.sgs as string[]) : [];
@@ -431,7 +432,7 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
             {edge.kind === "route" && <div className="fields"><label>Destination<input value={String(edge.params.dest ?? "")} onChange={(e) => setEdgeDest(edge.id, e.target.value)} placeholder="0.0.0.0/0" /></label>
               <div className="small muted">0.0.0.0/0 = everything not inside the VPC (the internet)</div></div>}
             {edge.kind === "attach" && <p className="small muted">The subnet uses this route table. A subnet uses one table; a table can serve many subnets.</p>}
-            {edge.kind === "target" && <div className="fields"><label>Port the targets listen on<input type="number" min={1} max={65535} value={Number(edge.params.port ?? 8080)} onChange={(e) => change({ ...design, edges: design.edges.map((x) => (x.id === edge.id ? { ...x, params: { ...x.params, port: Math.max(1, Number(e.target.value) || 1) } } : x)) }, true)} /></label>
+            {edge.kind === "target" && <div className="fields"><label>Port the targets listen on<Num min={1} max={65535} value={Number(edge.params.port ?? 8080)} onCommit={(v) => change({ ...design, edges: design.edges.map((x) => (x.id === edge.id ? { ...x, params: { ...x.params, port: v } } : x)) }, true)} /></label>
               <div className="small muted">The target's security group must let this port in from the balancer's group (a traffic arrow between the two groups).</div></div>}
             {edge.kind === "traffic" && <div className="fields">
               <label>Protocol<select value={String(edge.params.proto ?? "tcp")} onChange={(e) => change({ ...design, edges: design.edges.map((x) => (x.id === edge.id ? { ...x, params: { ...x.params, proto: e.target.value } } : x)) })}>

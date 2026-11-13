@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.7.1 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.7.2 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
 Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
@@ -26,7 +26,9 @@ the owner's to type: vCPUs and memory are free numbers, any instance type name i
 unknown, never refused), key pair names are suggested (~/.ssh files, the design, the account's pairs on request); more images:
 Ubuntu 22.04, the Deep Learning AMI (PyTorch) and Base AMI, OpenVPN Access Server (Marketplace), each with its architecture,
 smallest root volume and note, checked (x86-only image on Graviton = error, root volume too small = error with a Fix, DLAMI
-without a GPU = warning, OpenVPN without udp 1194 in = warning).
+without a GPU = warning, OpenVPN without udp 1194 in = warning). 0.7.2: no number field clamps while typing (`Num.tsx`;
+"select all, type 200" had become 800); the ranges AWS enforces (root volume 8–16384 GiB, hours 1–744, max ≥ 1, no negative
+storage) are messages on the block instead.
 Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
@@ -178,6 +180,9 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
                            "aib-arrange" event) sends the measured block sizes (rf.getNodes().measured). An instance block has
                            "Connect (SSH)" -> the "aib-connect" event -> the Terminal tab. Colours: COLORS by day,
                            neon(COLORS) at night through --c (useColor)
+  Num.tsx                  the number field every inspector number uses: it keeps the typed text and stores it whenever it is a number,
+                           never clamping (a clamp on each keystroke turned "2" into the minimum 8 and "200" into 800); ranges are the
+                           checks' business. New number fields use it, not a clamped <input type="number">
   NewInstance.tsx          the "New instance" dialog (and "Recommend a type…" on an instance): vCPUs and memory as free numbers, GPU, OS /
                            image (with its note), key pair name (datalist: ~/.ssh files, the design's names, "Names from AWS" = aws_key_pairs),
                            hours a month (presets: always on 730, working hours 176, about 10 h a day 320, a few evenings 60, one day 8,
