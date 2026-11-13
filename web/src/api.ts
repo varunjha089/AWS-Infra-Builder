@@ -19,6 +19,11 @@ export type Source = { kind: "none" } | { kind: "profile"; name: string } | { ki
 export interface Identity { account: string; arn: string; user_id: string; region: string; checked: number }
 export interface AwsState { profiles: Profile[]; aws_dir: string; source: Source; keys: { hint: string; temporary: boolean } | null; region: string | null; identity: Identity | null; policy: string }
 export interface VpcInfo { id: string; name: string | null; cidr: string; is_default: boolean; subnets: number }
+export interface Change { address: string; resource_type: string; name: string; action: string; block_id: string | null; block_label: string | null; replace_because: string[] }
+export interface PlanSummary { creates: number; updates: number; replaces: number; destroys: number; changes: Change[]; by_block: Record<string, string>; cost_delta: number; summary: string; empty: boolean }
+export interface JobSnap { state: "idle" | "running" | "done" | "failed"; kind: string; log: string[]; next: number; message: string; plan: PlanSummary | null; outputs: [string, string][]; marks: Record<string, string>; aws_ids: Record<string, string>; started: number }
+export interface TofuStatus { tofu: string | null; version: string | null; install_version: string; source: string; identity: Identity | null; project_account: string | null; budget: number | null;
+  state: { has_state: boolean; resources: number; last_apply: string | null; backups: number; plan_fresh: boolean; plan_destroy: boolean } }
 export interface Loaded { design: Design; analysis: Analysis }
 export interface TextError { line: number; message: string }
 
@@ -52,6 +57,13 @@ export const api = {
   designRemove: (design: Design, nodes: string[], edges: string[]) => invoke<Loaded>("design_remove", { design, nodes, edges }),
   textHelp: () => invoke<[string, string][]>("text_help"),
   code: (design: Design) => invoke<Record<string, string>>("code", { design }),
+  tofuStatus: () => invoke<TofuStatus>("tofu_status"),
+  tofuInstall: () => invoke<void>("tofu_install"),
+  tofuPlan: (destroy: boolean) => invoke<void>("tofu_plan", { destroy }),
+  tofuApply: (confirm: string, acceptBudget: boolean) => invoke<void>("tofu_apply", { confirm, acceptBudget }),
+  job: (since: number) => invoke<JobSnap>("job_status", { since }),
+  projectSetBudget: (budget: number | null) => invoke<void>("project_set_budget", { budget }),
+  designSetAwsIds: (ids: Record<string, string>, clear: boolean) => invoke<Loaded>("design_set_aws_ids", { ids, clear }),
   exportCode: () => invoke<string>("export_code"),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
   awsState: () => invoke<AwsState>("aws_state"),

@@ -122,6 +122,26 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; backgroun
 .text-tab .text-help td { padding: 3px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .text-tab .text-help td:first-child { white-space: nowrap; }
 
+/* the plan on the canvas: green = will be created, yellow = changed in place, orange = replaced, red = destroyed; apply: dashed while
+   AWS works, solid when done */
+.ribbon { position: absolute; top: -9px; right: 8px; padding: 0 7px; border-radius: 8px; font: 700 10px/16px -apple-system, sans-serif; color: #fff; text-transform: uppercase; letter-spacing: .03em; z-index: 3; }
+.act-create { --act: #2e7d32; } .act-update { --act: #b26a00; } .act-replace { --act: #d2691e; } .act-destroy { --act: #c62828; }
+.act-creating, .act-changing, .act-destroying { --act: #2f6fde; } .act-created, .act-changed { --act: #2e7d32; } .act-destroyed { --act: #6b7280; } .act-failed { --act: #c62828; }
+.ribbon[class*="act-"] { background: var(--act); }
+.pill[class*="act-"] { background: var(--act); color: #fff; }
+tr[class*="act-"] td:first-child { border-left: 3px solid var(--act); }
+.react-flow__node[class*="plan-"] .box, .react-flow__node[class*="plan-"] .block { outline: 2px dashed var(--act); outline-offset: 3px; }
+.react-flow__node.plan-create { --act: #2e7d32; } .react-flow__node.plan-update { --act: #b26a00; } .react-flow__node.plan-replace { --act: #d2691e; } .react-flow__node.plan-destroy { --act: #c62828; }
+.react-flow__node.mark-creating .box, .react-flow__node.mark-creating .block, .react-flow__node.mark-destroying .box, .react-flow__node.mark-destroying .block { outline: 2px dashed #2f6fde; outline-offset: 3px; animation: pulse 1s infinite alternate; }
+.react-flow__node.mark-created .box, .react-flow__node.mark-created .block { outline: 3px solid #2e7d32; outline-offset: 3px; }
+.react-flow__node.mark-failed .box, .react-flow__node.mark-failed .block { outline: 3px solid #c62828; outline-offset: 3px; }
+.react-flow__node.mark-destroyed .box, .react-flow__node.mark-destroyed .block { opacity: .45; }
+@keyframes pulse { from { outline-color: #2f6fde; } to { outline-color: transparent; } }
+.awsid { font: 10.5px ui-monospace, Menlo, monospace; color: var(--muted); margin-left: 6px; }
+.legend { position: absolute; z-index: 5; left: 8px; bottom: 8px; padding: 6px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; display: flex; gap: 6px; align-items: center; }
+pre.log { white-space: pre-wrap; }
+label.chk { display: flex; align-items: center; gap: 6px; }
+
 /* night: neon. Dark panels, neon outlines and glowing text; every block, palette button and heading glows in its kind's own
    colour (--c, set in Design.tsx from neon(COLORS[kind])). Day mode above is untouched. */
 :root[data-theme="night"] { color-scheme: dark;
@@ -191,3 +211,7 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; backgroun
 [data-theme="night"] .text-tab .gutter .err { text-shadow: 0 0 6px var(--err); }
 [data-theme="night"] table.grid th { color: #ff4fd8; text-shadow: 0 0 5px rgba(255,79,216,.5); }
 [data-theme="night"] .toast { border: 1px solid var(--accent); box-shadow: 0 0 14px rgba(0,229,255,.45); text-shadow: 0 0 5px var(--accent); }
+[data-theme="night"] .ribbon { text-shadow: 0 0 4px #000; box-shadow: 0 0 8px var(--act); }
+[data-theme="night"] .react-flow__node[class*="plan-"] .box, [data-theme="night"] .react-flow__node[class*="plan-"] .block { box-shadow: 0 0 14px var(--act), 0 0 30px -6px var(--act); }
+[data-theme="night"] .react-flow__node.mark-created .box, [data-theme="night"] .react-flow__node.mark-created .block { box-shadow: 0 0 16px #39ff88, 0 0 36px -4px #39ff88; outline-color: #39ff88; }
+[data-theme="night"] .legend { border-color: rgba(0,229,255,.45); box-shadow: 0 0 10px rgba(0,229,255,.18); }

@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod aws;
+mod tofu;
 
 use aib_core::checks::{self, Analysis};
 use aib_core::creds::{self, Source};
@@ -22,6 +23,7 @@ use tauri_plugin_dialog::DialogExt;
 
 struct App {
     project: Mutex<Option<Project>>,
+    jobs: tofu::Jobs,
 }
 
 const SERVICE: &str = "AWS Infra Builder";
@@ -392,6 +394,151 @@ async fn aws_import(st: State<'_, App>, region: Option<String>, vpc_id: String) 
     Ok(json!({"project": project_json(&p), "notes": im.notes}))
 }
 
+// ---------------------------------------------------------------- plan / apply with OpenTofu
+fn project_meta(p: &Project) -> Value {
+    store::read_json(&p.dir.join("project.json")).unwrap_or_else(|| json!({}))
+}
+
+fn save_project_meta(p: &Project, meta: &Value) -> R<()> {
+    store::write_json(&p.dir.join("project.json"), meta).map_err(e)
+}
+
+#[tauri::command]
+fn tofu_status(st: State<'_, App>) -> R<Value> {
+    let path = tofu::locate();
+    let p = st.project.lock().unwrap().clone();
+    let meta = p.as_ref().map(project_meta).unwrap_or_else(|| json!({}));
+    let src = match source() { Source::None => "none".to_string(), Source::Profile { name } => format!("profile {name}"), Source::Keys => "pasted keys".into() };
+    Ok(json!({
+        "tofu": path.as_ref().map(|p| p.to_string_lossy().to_string()),
+        "version": path.as_ref().and_then(|p| tofu::version(p)),
+        "install_version": tofu::TOFU_VERSION,
+        "source": src,
+        "identity": store::settings()["aws_identity"],
+        "project_account": meta["aws"]["account"].as_str().filter(|a| !a.is_empty()),
+        "budget": meta["budget"],
+        "state": p.as_ref().map(|p| tofu::state_info(&p.dir)).unwrap_or_default(),
+    }))
+}
+
+#[tauri::command]
+fn tofu_install(st: State<'_, App>) -> R<()> {
+    tofu::install(&st.jobs)
+}
+
+#[tauri::command]
+fn job_status(st: State<'_, App>, since: usize) -> tofu::JobSnap {
+    st.jobs.snapshot(since)
+}
+
+#[tauri::command]
+fn project_set_budget(st: State<'_, App>, budget: Option<f64>) -> R<()> {
+    let p = project(&st)?;
+    let mut meta = project_meta(&p);
+    match budget {
+        Some(b) if b > 0.0 => meta["budget"] = json!(b),
+        _ => { meta.as_object_mut().map(|m| m.remove("budget")); }
+    }
+    save_project_meta(&p, &meta)
+}
+
+/// the environment OpenTofu gets: a profile name, or the pasted keys (never logged, never written)
+fn tofu_env() -> R<Vec<(String, String)>> {
+    Ok(match creds_for_call()? {
+        aws::Creds::Profile(name) => vec![("AWS_PROFILE".into(), name)],
+        aws::Creds::Keys { id, secret, token } => {
+            let mut v = vec![("AWS_ACCESS_KEY_ID".into(), id), ("AWS_SECRET_ACCESS_KEY".into(), secret)];
+            if let Some(t) = token.filter(|t| !t.is_empty()) {
+                v.push(("AWS_SESSION_TOKEN".into(), t));
+            }
+            v
+        }
+    })
+}
+
+/// the account guard: the credentials must point at the project's account (set by the first plan), and the identity is checked live
+async fn guarded_ctx(st: &State<'_, App>) -> R<tofu::Ctx> {
+    let p = project(st)?;
+    let tofu_path = tofu::locate().ok_or("OpenTofu is not installed: use Install in the Plan tab, or `brew install opentofu`.")?;
+    let design = p.design();
+    let id = aws::identity(creds_for_call()?, &design.region).await?;
+    store::save_setting("aws_identity", json!({"account": id.account, "arn": id.arn, "user_id": id.user_id, "region": design.region, "checked": chrono_now()})).map_err(e)?;
+    let mut meta = project_meta(&p);
+    match meta["aws"]["account"].as_str().filter(|a| !a.is_empty()) {
+        Some(a) if a != id.account => return Err(format!("Account guard: this project belongs to account {a}, but the credentials are for {}. Nothing was run.", id.account)),
+        Some(_) => {}
+        None => {
+            meta["aws"]["account"] = json!(id.account);
+            meta["aws"]["region"] = json!(design.region);
+            save_project_meta(&p, &meta)?;
+        }
+    }
+    if meta["aws"]["region"].as_str().map(|r| r != design.region).unwrap_or(false) {
+        return Err(format!("This project's resources are in {}, but the design now says {}. Change the region back, or make a new project for the other region.", meta["aws"]["region"].as_str().unwrap_or("?"), design.region));
+    }
+    Ok(tofu::Ctx { tofu: tofu_path, project: p.dir.clone(), project_name: p.name(), design, env: tofu_env()? })
+}
+
+#[tauri::command]
+async fn tofu_plan(st: State<'_, App>, destroy: bool) -> R<()> {
+    if st.jobs.running() {
+        return Err("A job is still running.".into());
+    }
+    let cx = guarded_ctx(&st).await?;
+    if !destroy && !checks::analyse(&cx.design).ok {
+        return Err("The design has errors; fix them before planning.".into());
+    }
+    tofu::plan(&st.jobs, cx, destroy)
+}
+
+/// apply the shown plan; `confirm` must be the project's name when anything is destroyed or replaced; `accept_budget` when the
+/// estimate is above the project's budget
+#[tauri::command]
+async fn tofu_apply(st: State<'_, App>, confirm: String, accept_budget: bool) -> R<()> {
+    if st.jobs.running() {
+        return Err("A job is still running.".into());
+    }
+    let snap = st.jobs.snapshot(0);
+    let Some(plan) = snap.plan.clone().filter(|_| snap.state == "done" && (snap.kind == "plan" || snap.kind == "plan-destroy")) else {
+        return Err("Run Plan first: apply only runs the plan you have seen.".into());
+    };
+    let cx = guarded_ctx(&st).await?;
+    let info = tofu::state_info(&cx.project);
+    if !info.plan_fresh {
+        return Err("The design changed since the plan: run Plan again.".into());
+    }
+    let destroy = snap.kind == "plan-destroy";
+    if (plan.destroys > 0 || plan.replaces > 0) && confirm.trim() != cx.project_name {
+        return Err(format!("This would destroy {} and replace {} resources: type the project's name ({}) to allow it.", plan.destroys, plan.replaces, cx.project_name));
+    }
+    let meta = project_meta(&project(&st)?);
+    if let Some(b) = meta["budget"].as_f64() {
+        let est = checks::analyse(&cx.design).cost.total;
+        if !destroy && est > b && !accept_budget {
+            return Err(format!("The estimate (USD {est:.2} a month) is above this project's budget (USD {b:.2}). Tick the budget box to apply anyway, or change the design."));
+        }
+    }
+    tofu::apply(&st.jobs, cx, destroy)
+}
+
+/// after an apply: the AWS ids of the created resources go into the design (the blocks show them)
+#[tauri::command]
+fn design_set_aws_ids(st: State<'_, App>, ids: std::collections::HashMap<String, String>, clear: bool) -> R<Loaded> {
+    let p = project(&st)?;
+    let mut d = p.design();
+    for n in d.nodes.iter_mut() {
+        if clear {
+            n.params.remove("aws_id");
+        }
+        if let Some(id) = ids.get(&n.id) {
+            n.params.insert("aws_id".into(), json!(id));
+        }
+    }
+    let l = loaded(d);
+    p.save_design(&l.design).map_err(e)?;
+    Ok(l)
+}
+
 // ---------------------------------------------------------------- menu
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let item = |id: &str, text: &str, accel: Option<&str>| MenuItem::with_id(app, id, text, true, accel);
@@ -430,7 +577,8 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &item("tab-design", "Design", Some("CmdOrCtrl+1"))?,
         &item("tab-text", "Text", Some("CmdOrCtrl+2"))?,
         &item("tab-code", "Code", Some("CmdOrCtrl+3"))?,
-        &item("tab-costs", "Costs", Some("CmdOrCtrl+4"))?,
+        &item("tab-plan", "Plan & Apply", Some("CmdOrCtrl+4"))?,
+        &item("tab-costs", "Costs", Some("CmdOrCtrl+7"))?,
         &item("tab-account", "Account", Some("CmdOrCtrl+5"))?,
         &item("tab-connection", "Connection", Some("CmdOrCtrl+6"))?,
         &item("tab-project", "Projects", Some("CmdOrCtrl+0"))?,
@@ -456,7 +604,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 fn on_menu(app: &tauri::AppHandle, id: &str) {
     match id {
-        "tab-design" | "tab-text" | "tab-code" | "tab-costs" | "tab-account" | "tab-connection" | "tab-project" => { let _ = app.emit("open-tab", id.trim_start_matches("tab-")); }
+        "tab-design" | "tab-text" | "tab-code" | "tab-plan" | "tab-costs" | "tab-account" | "tab-connection" | "tab-project" => { let _ = app.emit("open-tab", id.trim_start_matches("tab-")); }
         other => { let _ = app.emit("menu", other); }
     }
 }
@@ -464,7 +612,7 @@ fn on_menu(app: &tauri::AppHandle, id: &str) {
 fn main() {
     // an unsaved draft does not outlive the app (also after a crash)
     let _ = store::discard_draft();
-    let app = App { project: Mutex::new(store::last_project()) };
+    let app = App { project: Mutex::new(store::last_project()), jobs: tofu::Jobs::default() };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(app)
@@ -477,7 +625,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             app_state, project_new, project_open, project_from_template, project_save_as, project_close, project_forget, set_projects_dir, pick_folder,
             project_load, save_design, design_from_text, design_arrange, design_add, design_connect, design_remove, text_help, code, export_code, open_url,
-            aws_state, aws_set_keys, aws_clear_keys, aws_select, aws_test, aws_list_vpcs, aws_import
+            aws_state, aws_set_keys, aws_clear_keys, aws_select, aws_test, aws_list_vpcs, aws_import,
+            tofu_status, tofu_install, tofu_plan, tofu_apply, job_status, project_set_budget, design_set_aws_ids
         ])
         .build(tauri::generate_context!())
         .expect("error while running AWS Infra Builder")

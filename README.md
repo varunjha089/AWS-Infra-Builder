@@ -8,9 +8,9 @@ Terraform shows the whole text but not the picture, and mistakes appear only at 
 wrong CIDR, a private subnet with no way out, or a NAT Gateway in the wrong subnet at design time, on the block itself, in plain
 words, with what to change.
 
-**Version 0.3.0: networking, security groups and instances on the canvas and in text; OpenTofu/Terraform code; costs; a read-only look at
-your account; neon night mode.** The app only ever reads from AWS (`sts:GetCallerIdentity`, `ec2:Describe*`); nothing is created, changed or
-deleted. To build what you drew, export the code and run `tofu plan` / `tofu apply` yourself (Apply from the app comes in the next phase).
+**Version 0.4.0: networking, security groups and instances on the canvas and in text; OpenTofu/Terraform code; Plan & Apply from the app;
+costs; a read-only look at your account; neon night mode.** The app itself only reads from AWS; resources are created only when you press
+Apply after seeing the plan, and the Costs tab tells you beforehand what they cost a month.
 
 ## What it does now
 
@@ -29,6 +29,12 @@ deleted. To build what you drew, export the code and run `tofu plan` / `tofu app
 - **Code tab:** the design as `main.tf`, `variables.tf` and `outputs.tf` for the AWS provider, one resource per block with a comment naming
   the block and the tags `managed-by = aws-infra-builder`, `project`, `design-block`. Copy or export; every template's code passes
   `tofu validate` (checked in CI).
+- **Plan & Apply tab:** OpenTofu is found on your PATH or installed into the app's folder from the official release (checksum-verified).
+  *Plan* is read-only and is drawn on the canvas: green = will be created, yellow = changed, orange = replaced, red = destroyed, with the
+  estimated change in monthly cost. *Apply* runs only the plan you saw; when anything would be destroyed or replaced you type the project's
+  name first. The state file stays in the project's `tofu/` folder and is backed up before every apply. Guards: the credentials must point
+  at the account the project was first planned against; an apply above the project's monthly budget needs an extra tick. *Destroy* is a
+  separate plan behind the typed project name. Blocks show their AWS ids once created; outputs (IPs, ids) are listed.
 - **Text tab:** the same design as `.aib` text, one line per block, kept in step both ways:
 
   ```text
@@ -73,7 +79,7 @@ deleted. To build what you drew, export the code and run `tofu plan` / `tofu app
 |---|---|
 | 0 (done) | canvas, CIDR and routing checks, `.aib` text, templates; plus credentials, costs and VPC import pulled forward |
 | 1 (done) | security groups as traffic arrows, EC2, Terraform/OpenTofu HCL generation, `tofu validate` in CI |
-| 2 | plan / apply / destroy with a bundled OpenTofu, the plan drawn on the canvas, state backups, account guard |
+| 2 (done) | plan / apply / destroy with OpenTofu, the plan drawn on the canvas, state backups, account and budget guards |
 | 3 | ALB, Auto Scaling, RDS, S3, VPC endpoints; reachability questions; cost estimates |
 | 4 | drift check, least-privilege deploy policy generated from the design, budget guard |
 

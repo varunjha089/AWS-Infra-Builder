@@ -10,6 +10,7 @@ pub mod dsl;
 pub mod hcl;
 pub mod import;
 pub mod model;
+pub mod plan;
 pub mod pricing;
 pub mod store;
 pub mod templates;

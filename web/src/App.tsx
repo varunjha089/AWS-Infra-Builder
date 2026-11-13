@@ -2,7 +2,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toggleTheme, useTheme } from "./theme";
-import { api, errText, type Analysis, type AppState, type Design, type Loaded } from "./api";
+import { api, errText, type Analysis, type AppState, type Design, type JobSnap, type Loaded } from "./api";
+import { PlanTab } from "./PlanTab";
 import { DesignTab } from "./Design";
 import { TextTab } from "./TextTab";
 import { CostsTab } from "./CostsTab";
@@ -10,7 +11,7 @@ import { CodeTab } from "./CodeTab";
 import { ConnectionTab } from "./ConnectionTab";
 import { AccountTab } from "./AccountTab";
 
-type Tab = "project" | "design" | "text" | "code" | "costs" | "account" | "connection";
+type Tab = "project" | "design" | "text" | "code" | "plan" | "costs" | "account" | "connection";
 
 export default function App() {
   const [st, setSt] = useState<AppState | null>(null);
@@ -22,6 +23,8 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
   const [signal, setSignal] = useState<{ fit: number }>({ fit: 0 });
+  const [job, setJob] = useState<JobSnap | null>(null);
+  const jobLog = useRef<string[]>([]);
   const timers = useRef<Record<string, number>>({});
   // Undo / Redo: snapshots before each change; changes in quick succession (typing a CIDR) count as one step
   const past = useRef<Design[]>([]), future = useRef<Design[]>([]), lastPush = useRef(0);
@@ -71,6 +74,25 @@ export default function App() {
   }, [apply]);
 
   const reload = useCallback(async () => { const s = await api.state(); setSt(s); return s; }, []);
+  /** follow the background job (install, plan, apply, destroy) until it ends; the plan and the marks reach the canvas through `job` */
+  const startJob = useCallback(() => {
+    jobLog.current = [];
+    let since = 0;
+    const tick = async () => {
+      const j = await api.job(since).catch(() => null);
+      if (!j) return;
+      since = j.next;
+      jobLog.current = [...jobLog.current, ...j.log].slice(-600);
+      setJob({ ...j, log: jobLog.current });
+      if (j.state === "running") { window.setTimeout(tick, 600); return; }
+      if (j.state === "done" && (j.kind === "apply" || j.kind === "destroy")) {
+        // the created resources' ids go onto the blocks (a destroy clears them)
+        api.designSetAwsIds(j.aws_ids, j.kind === "destroy").then((l) => { setDesign(l.design); setAnalysis(l.analysis); }).catch(() => {});
+      }
+      if (j.message) toast(j.message);
+    };
+    tick();
+  }, [toast]);
   const loadProject = useCallback(async () => {
     past.current = []; future.current = [];
     const l = await api.load();
@@ -125,7 +147,7 @@ export default function App() {
   };
 
   if (!st) return <div className="page muted">Loading…</div>;
-  const tabs: [Tab, string][] = [["design", "Design"], ["text", "Text"], ["code", "Code"], ["costs", "Costs"]];
+  const tabs: [Tab, string][] = [["design", "Design"], ["text", "Text"], ["code", "Code"], ["plan", "Plan & Apply"], ["costs", "Costs"]];
   const summary = analysis ? (analysis.ok ? (analysis.warnings ? `${analysis.warnings} warning${analysis.warnings > 1 ? "s" : ""}` : "design is clean") : `${analysis.errors} error${analysis.errors > 1 ? "s" : ""}`) : "";
 
   return (
@@ -144,7 +166,8 @@ export default function App() {
       </header>
       <main>
         {tab === "project" && <ProjectsPage st={st} reload={reload} toast={toast} onOpened={() => loadProject().then(() => setTab("design")).catch((e) => toast(errText(e)))} />}
-        {tab === "design" && design && analysis && st.project && <DesignTab design={design} analysis={analysis} st={st} change={change} apply={apply} toast={toast} selectId={selectId} setSelectId={setSelectId} signal={signal} />}
+        {tab === "design" && design && analysis && st.project && <DesignTab design={design} analysis={analysis} st={st} change={change} apply={apply} toast={toast} selectId={selectId} setSelectId={setSelectId} signal={signal} job={job} />}
+        {tab === "plan" && design && analysis && st.project && <PlanTab st={st} design={design} analysis={analysis} job={job} startJob={startJob} toast={toast} goDesign={() => setTab("design")} />}
         {tab === "text" && design && <TextTab design={design} onApply={applyText} onFormat={() => design && persist(design)} />}
         {tab === "code" && design && analysis && <CodeTab design={design} analysis={analysis} toast={toast} />}
         {tab === "costs" && design && analysis && <CostsTab design={design} analysis={analysis} />}

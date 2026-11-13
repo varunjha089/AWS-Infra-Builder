@@ -6,14 +6,14 @@ import {
   MarkerType, type Connection, type Edge, type EdgeChange, type Node, type NodeChange, type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { api, errText, type Analysis, type AppState, type DNode, type Design, type EdgeResult, type Loaded, type NodeResult } from "./api";
+import { api, errText, type Analysis, type AppState, type DNode, type Design, type EdgeResult, type JobSnap, type Loaded, type NodeResult } from "./api";
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
 import { neon, useTheme } from "./theme";
 
 export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569" };
 const CONTAINER = (kind: string) => kind === "vpc" || kind === "subnet";
 
-type Data = { node: DNode; result?: NodeResult; azName: string };
+type Data = { node: DNode; result?: NodeResult; azName: string; plan?: string; mark?: string };
 
 function baseColor(n: DNode): string {
   return n.kind === "subnet" ? COLORS[String(n.params.tier)] ?? COLORS.subnet : COLORS[n.kind] ?? "#999";
@@ -33,8 +33,9 @@ function BoxNode({ data, selected }: NodeProps<Node<Data>>) {
   return (
     <div className={`box ${n.kind} st-${st} ${selected ? "sel" : ""}`} style={{ "--c": color(n) } as CSSProperties}>
       <NodeResizer minWidth={isVpc ? 300 : 160} minHeight={isVpc ? 200 : 90} isVisible={!!selected} />
+      {(data.plan || data.mark) && <span className={`ribbon act-${data.mark ?? data.plan}`}>{data.mark ?? data.plan}</span>}
       <div className="bh">
-        <span>{isVpc ? "VPC" : String(n.params.tier ?? "subnet")}{mark(st)}</span><span className="bl">{n.label}</span>
+        <span>{isVpc ? "VPC" : String(n.params.tier ?? "subnet")}{mark(st)}</span><span className="bl">{n.label}</span>{n.params.aws_id ? <span className="awsid" title="created in AWS">{String(n.params.aws_id)}</span> : null}
         <span className="bs" title={r?.summary}>{isVpc ? String(n.params.cidr ?? "") : `${n.params.cidr || "no CIDR"} · ${data.azName}`}</span>
       </div>
       {!isVpc && r && <div className={`bm st-${st}`}>{r.status !== "ok" ? r.messages[0] : r.info[0]?.replace(/^.*= /, "") + (r.info[0] ? " usable" : "")}</div>}
@@ -52,8 +53,9 @@ function BlockNode({ data, selected }: NodeProps<Node<Data>>) {
     <div className={`block st-${st} ${selected ? "sel" : ""}`} style={{ "--c": color(n) } as CSSProperties}>
       {(n.kind === "rt" || n.kind === "sg" || n.kind === "cidr") && <Handle type="target" position={Position.Left} />}
       {(n.kind === "igw" || n.kind === "nat") && <Handle type="target" position={Position.Top} />}
+      {(data.plan || data.mark) && <span className={`ribbon act-${data.mark ?? data.plan}`}>{data.mark ?? data.plan}</span>}
       <div className="lh"><span>{r?.title ?? n.kind}{mark(st)}</span><span className="bl">{n.label}</span></div>
-      <div className={`ls st-${st}`}>{st !== "ok" ? r?.messages[0] : r?.summary || ""}</div>
+      <div className={`ls st-${st}`}>{st !== "ok" ? r?.messages[0] : r?.summary || ""}{n.params.aws_id ? <span className="awsid"> · {String(n.params.aws_id)}</span> : null}</div>
       {n.kind === "rt" && <Handle type="source" position={Position.Right} title="drag to a gateway" />}
       {(n.kind === "sg" || n.kind === "cidr") && <Handle type="source" position={Position.Right} title="drag to a security group or an address range: traffic" />}
     </div>
@@ -62,14 +64,17 @@ function BlockNode({ data, selected }: NodeProps<Node<Data>>) {
 const nodeTypes = { box: memo(BoxNode), block: memo(BlockNode) };
 
 /** the design's blocks as React Flow nodes (containers first, positions relative to the container) */
-function toNodes(d: Design, a: Analysis, azNames: string[]): Node<Data>[] {
+function toNodes(d: Design, a: Analysis, azNames: string[], job: JobSnap | null): Node<Data>[] {
   const res = Object.fromEntries(a.nodes.map((r) => [r.id, r]));
+  const planned = job && job.plan && (job.kind === "plan" || job.kind === "plan-destroy") && job.state !== "running" ? job.plan.by_block : {};
+  const marks = job && (job.kind === "apply" || job.kind === "destroy") ? job.marks : {};
   return d.nodes.map((n) => {
     const azIx = "abcdef".indexOf(String(n.params.az ?? ""));
     const azName = azNames[azIx] ?? `${d.region}${n.params.az ?? ""}`;
     const container = CONTAINER(n.kind);
     return {
-      id: n.id, type: container ? "box" : "block", position: { x: n.x, y: n.y }, data: { node: n, result: res[n.id], azName },
+      id: n.id, type: container ? "box" : "block", position: { x: n.x, y: n.y }, data: { node: n, result: res[n.id], azName, plan: planned[n.id], mark: marks[n.id] },
+      className: `${planned[n.id] ? `plan-${planned[n.id]}` : ""} ${marks[n.id] ? `mark-${marks[n.id]}` : ""}`,
       parentId: n.parent ?? undefined, style: container ? { width: n.w, height: n.h } : undefined, zIndex: n.kind === "vpc" ? 0 : n.kind === "subnet" ? 1 : 2,
     };
   });
@@ -106,14 +111,14 @@ function descendants(d: Design, id: string): string[] {
 
 interface Props {
   design: Design; analysis: Analysis; st: AppState; change: (d: Design, later?: boolean) => void; apply: (l: Loaded) => void; toast: (m: string) => void;
-  selectId: string | null; setSelectId: (id: string | null) => void; signal: { fit: number };
+  selectId: string | null; setSelectId: (id: string | null) => void; signal: { fit: number }; job: JobSnap | null;
 }
 
 export function DesignTab(p: Props) {
   return <ReactFlowProvider><Canvas {...p} /></ReactFlowProvider>;
 }
 
-function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelectId, signal }: Props) {
+function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelectId, signal, job }: Props) {
   const rf = useReactFlow();
   const color = useColor();
   const night = useTheme() === "night";
@@ -130,10 +135,10 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
     setNodes((old) => {
       const sel = new Set(old.filter((n) => n.selected).map((n) => n.id));
       if (selectId) sel.add(selectId);
-      return toNodes(design, analysis, analysis.az_names).map((n) => ({ ...n, selected: sel.has(n.id) }));
+      return toNodes(design, analysis, analysis.az_names, job).map((n) => ({ ...n, selected: sel.has(n.id) }));
     });
     setEdges((old) => { const sel = new Set(old.filter((e) => e.selected).map((e) => e.id)); return toEdges(design, analysis).map((e) => ({ ...e, selected: sel.has(e.id) })); });
-  }, [design, analysis, selectId]);
+  }, [design, analysis, selectId, job]);
   useEffect(() => { if (signal.fit) window.setTimeout(() => rf.fitView({ padding: 0.15, duration: 300 }), 60); }, [signal, rf]);
 
   const onNodesChange = useCallback((changes: NodeChange<Node<Data>>[]) => {
@@ -248,6 +253,9 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
       </aside>
       <div className="canvas">
         {design.nodes.length === 0 && <div className="msg info big-hint">Empty design: add a VPC from the palette, then subnets, an Internet Gateway and a route table. Or open a template from the Projects page.</div>}
+        {job && job.plan && (job.kind === "plan" || job.kind === "plan-destroy") && job.state === "done" && !job.plan.empty && <div className="legend">
+          <strong>Plan:</strong> {job.plan.summary} · <span className="pill act-create">create</span> <span className="pill act-update">change</span> <span className="pill act-replace">replace</span> <span className="pill act-destroy">destroy</span></div>}
+        {job && (job.kind === "apply" || job.kind === "destroy") && <div className="legend"><strong>{job.kind === "apply" ? "Applying" : "Destroying"}{job.state === "running" ? "…" : `: ${job.state}`}</strong> · blocks turn solid as AWS finishes them</div>}
         <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
           onNodeDragStart={() => { dragging.current = true; }} onNodeDragStop={onNodeDragStop} onConnect={onConnect} onDelete={onDelete}
           deleteKeyCode={["Backspace", "Delete"]} fitView minZoom={0.15} maxZoom={2} selectNodesOnDrag={false} elevateNodesOnSelect={false}

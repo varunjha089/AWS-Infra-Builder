@@ -4,13 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.3.0 (12 November 2026): phases 0 and 1 of the roadmap in `IDEA.md` (the full design; read it before changing the model), plus
-credentials, import and costs pulled forward. The app draws VPCs, subnets, Internet/NAT Gateways, route tables, security groups with
+Version 0.4.0 (13 November 2026): phases 0, 1 and 2 of the roadmap in `IDEA.md` (the full design; read it before changing the model), plus
+credentials, import and costs pulled forward. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
+from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
+project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
+another account (account guard) or the estimate exceeds the project's budget without a tick (budget guard). The app draws VPCs, subnets, Internet/NAT Gateways, route tables, security groups with
 traffic arrows, EC2 instances and address ranges; checks CIDRs, routing, exposure and placement while drawing; keeps the design in step
 with `.aib` text; generates OpenTofu/Terraform HCL (validated with `tofu validate` for every template, locally and in CI); shows what
 the design costs a month and how to pay less; takes AWS credentials from `~/.aws` profiles or pasted keys (keychain); imports an existing
-VPC with its groups, rules and instances read-only. Night mode is neon. AWS is only ever read (`sts:GetCallerIdentity`,
-`ec2:Describe*`). Still to come (`IDEA.md` §13): plan/apply with a bundled OpenTofu, ALB/ASG/RDS/S3/endpoints, reachability, drift.
+VPC with its groups, rules and instances read-only. Night mode is neon. The app itself only reads AWS; OpenTofu changes it only on the
+owner's Apply. **Never run apply or destroy in tests or on your own: it creates resources that cost money.** The opt-in real tests
+only read (identity, import, plan). Still to come (`IDEA.md` §13): ALB/ASG/RDS/S3/endpoints, reachability, drift, remote state.
 
 ## Layout
 
@@ -43,6 +47,10 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            (needs tofu + the internet): `cargo test -p aib-core -- --ignored`; examples/dump_hcl.rs writes the templates for CI.
   templates.rs             TEMPLATES as .aib text (single_public, web_server, two_tier, three_tier, broken); build(key). The test checks
                            print(parse(t)) == t, so a template's text must be in print order
+  plan.rs                  parse_plan(design, `tofu show -json`) -> PlanSummary {creates, updates, replaces, destroys, changes, by_block
+                           (block id -> strongest action, by the design-block tag or the resource name), cost_delta (from pricing), summary};
+                           parse_apply_line(design, one `-json` line) -> ApplyEvent {kind, message, block_id, aws_id, error}; parse_outputs.
+                           Tested with hand-written JSON.
   store.rs                 settings folder (AWS_INFRA_BUILDER_HOME, else ~/Library/Application Support/AWS Infra Builder), settings.json,
                            projects (project.json + design.json; an imported project's project.json has "aws": {account, region, vpc_id}),
                            the one unsaved draft (<home>/draft) for templates and imports, save_as, listing (canonical paths)
@@ -59,12 +67,23 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            groups (egress "all" when AWS's allow-all is the only egress rule), one cidr block per range, a traffic arrow per
                            permission (a mirrored pair once), instances with the OS guessed from the AMI name; what was left out is noted.
                            Tested with a hand-built inventory; the AWS calls are in the app.
+app/src-tauri/src/tofu.rs  OpenTofu: locate() (settings tofu_path, <home>/bin/tofu, PATH, /opt/homebrew/bin; terraform too), install()
+                           (official release zip for the OS/arch, SHA-256 checked against the published sums, unzipped into <home>/bin),
+                           Jobs (one background job: JobSnap {state, kind, log, plan, outputs, marks block->creating/created/failed/
+                           destroyed, aws_ids}), plan() (writes the HCL into <project>/tofu, init once with TF_PLUGIN_CACHE_DIR=<home>/
+                           plugin-cache, plan -out=plan.tfplan [-destroy], show -json -> PlanSummary), apply() (refuses without a plan,
+                           backs up terraform.tfstate to tofu/backups/<timestamp>, apply -json streamed, outputs), state_info().
+                           Credentials only in the child's environment (AWS_PROFILE, or the three key variables). One `#[ignore]` real
+                           test plans the web_server template read-only (12 to add) with the default profile.
 app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sdk-ec2): Creds {Profile | Keys}, identity(), list_vpcs(),
                            inventory() (VPC, subnets, IGWs, NATs, route tables, security groups, instances, AMI names) with a 60 s timeout
                            and readable errors. Only Describe* and GetCallerIdentity. One real test (`#[ignore]`, AWS_INFRA_BUILDER_REAL=1 with
                            the default profile) prints the account's first VPC as .aib.
 app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load, save_design, design_from_text, design_arrange, design_add,
-                           design_connect, design_remove, text_help, code, export_code, pick_folder, open_url; aws_state, aws_set_keys, aws_clear_keys,
+                           design_connect, design_remove, text_help, code, export_code, pick_folder, open_url; tofu_status, tofu_install,
+                           tofu_plan(destroy), tofu_apply(confirm, accept_budget) (guarded_ctx: live identity, account guard against
+                           project.json "aws".account set by the first plan, region guard, budget guard), job_status(since),
+                           project_set_budget, design_set_aws_ids (the created ids onto the blocks); aws_state, aws_set_keys, aws_clear_keys,
                            aws_select, aws_test, aws_list_vpcs, aws_import) and the menu (File/Edit/View/Design -> "menu" and "open-tab"
                            events). Every design command returns {design (synced), analysis}. Pasted keys live in the keychain (service
                            "AWS Infra Builder", items aws_key_id / aws_key_secret / aws_key_token), cached per launch; settings.json
@@ -76,6 +95,9 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
                            price, OS, key pair, public IP, group ticks, egress mode, rule protocol/ports, facts, problems). Colours: COLORS by
                            day, neon(COLORS) at night through --c (useColor)
   CodeTab.tsx              main.tf / variables.tf / outputs.tf from `code`, Copy, Export… (pick a folder)
+  PlanTab.tsx              OpenTofu status / Install, account guard and budget, Plan / Plan destroy, the change table, Apply or Destroy
+                           (typed project name when dangerous, budget tick), the live log, outputs. App.tsx polls job_status (startJob)
+                           and passes the job to Design.tsx: plan-<action> / mark-<state> classes and a ribbon on each block, a legend
   TextTab.tsx              the .aib text with a line gutter; Apply (⌘↩) -> design_from_text; errors by line
   CostsTab.tsx             the monthly estimate per block, the advice, the assumptions
   ConnectionTab.tsx        profiles (radio), pasted keys -> keychain, region, Test connection (identity), the read-only IAM policy
@@ -101,6 +123,9 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
 - A new block kind: `model::KINDS` (+ `defaults`, `edge_kind`, `arrange` placement), `checks.rs` (its rules), `pricing.rs` (its idle cost and the
   cheaper alternative), `dsl.rs` (parse the line and print it), `hcl.rs` (its resources), `import.rs` if AWS has it, `Design.tsx` (COLORS,
   palette, handles, inspector fields). A new template: `templates.rs` in print order; the template test checks it, and its HCL must validate.
+- Plan & Apply: never make the app apply without the shown plan, the typed name for destroys/replaces and the guards; the state file is the
+  owner's (back it up, never delete it); the project's `tofu/` folder is program output and may be regenerated, except `terraform.tfstate`
+  and `backups/`.
 - Night mode stays neon: a new screen or element gets its `[data-theme="night"]` rules (glow in --c or the cyan/magenta accents); day mode
   keeps its plain look.
 - Cost minimisation is a design rule: every block that costs money while idle shows its monthly price on the block, in the Costs tab and in
