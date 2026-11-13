@@ -90,7 +90,7 @@ crates/core/src/           aib-core: no UI, no AWS calls
   checks.rs                analyse(&Design) -> Analysis {nodes: NodeResult{status, messages, info, summary}, edges, problems, ok, counts, az_spread,
                            az_names, cost}. Every rule has a message that says what to change. Non-network CIDRs are errors (AWS and the provider
                            refuse them). Security: ssh/rdp/database ports open to 0.0.0.0/0 (warn), groups nobody uses or nothing reaches, rules
-                           across VPCs (error), egress "all" with arrows to a range. Instances: unknown type (warning: the owner may know it; price unknown), the image's rules (x86-only image on an
+                           across VPCs (error), egress "all" with arrows to a range. Instances: root volume outside 8–16384 GiB (error), hours outside 1–744 (warning, 730 used), unknown type (warning: the owner may know it; price unknown), the image's rules (x86-only image on an
                            arm64 type = error, root volume under the image's minimum = error, Deep Learning AMI without a GPU type = warning,
                            OpenVPN without udp 1194 in = warning, the image's note as info), public IP in a private tier,
                            no group, SSH in without a key pair, the Graviton type that would save money. Tests build designs from .aib text.
