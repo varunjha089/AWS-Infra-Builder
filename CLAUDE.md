@@ -76,9 +76,10 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            0.0.0.0/0 -> the arrow's source becomes an Address range "my_ip" <ip>/32), type (nearest_type: same size in
                            a family of the same letter, else t3.micro; GPU families -> g4dn.xlarge), graviton, public_ip_off/on,
                            asg_sizes, lifecycle, nat_move (a NAT in a private subnet -> the VPC's public subnet, same AZ first; else
-                           the subnet's tier fix). apply(design, fix, my_ip); apply_all_safe() re-lists after each. Analysis.fixes
+                           the subnet's tier fix), disk_min (the image's smallest root volume), os_arch (x86_twin: t4g -> t3, m6g -> m5,
+                           c6g -> c5, for an x86-only image). The `type` fix is not "safe": a typed type is the owner's choice. apply(design, fix, my_ip); apply_all_safe() re-lists after each. Analysis.fixes
   hosts.rs                 Host {id, label, host, user, port, key (path, "~" allowed), block, aws_id, note}; guess_user(os) (al2023 ec2-user,
-                           ubuntu ubuntu, debian admin), default_key_path(key pair) = ~/.ssh/<name>.pem, suggest(design) = one Host per
+                           ubuntu/ubuntu22/dlami ubuntu, debian admin, openvpn openvpnas), default_key_path(key pair) = ~/.ssh/<name>.pem, suggest(design) = one Host per
                            ec2 block (address from params.address, else a note why it cannot be reached yet), ssh_args(host, key path),
                            check(host) (plain-words problems before ssh starts), saved()/save() = settings.json "hosts". No key is read.
                            ssh_dir(), list_keys(dir) = KeyFile {path, name, kind pem|openssh|""} told apart by name (*.pem, *.key, a
@@ -87,11 +88,14 @@ crates/core/src/           aib-core: no UI, no AWS calls
   checks.rs                analyse(&Design) -> Analysis {nodes: NodeResult{status, messages, info, summary}, edges, problems, ok, counts, az_spread,
                            az_names, cost}. Every rule has a message that says what to change. Non-network CIDRs are errors (AWS and the provider
                            refuse them). Security: ssh/rdp/database ports open to 0.0.0.0/0 (warn), groups nobody uses or nothing reaches, rules
-                           across VPCs (error), egress "all" with arrows to a range. Instances: unknown type (error), public IP in a private tier,
+                           across VPCs (error), egress "all" with arrows to a range. Instances: unknown type (warning: the owner may know it; price unknown), the image's rules (x86-only image on an
+                           arm64 type = error, root volume under the image's minimum = error, Deep Learning AMI without a GPU type = warning,
+                           OpenVPN without udp 1194 in = warning, the image's note as info), public IP in a private tier,
                            no group, SSH in without a key pair, the Graviton type that would save money. Tests build designs from .aib text.
   dsl.rs                   the .aib text: parse(text, base) keeps ids and places of blocks whose label stays (new/moved blocks are laid out,
                            containers grow); lines vpc, subnet, igw, nat, rt, sg [egress rules], ec2 <type> [sg a,b] [key k] [public] [os x],
-                           cidr <range>, rule <from> -> <to> <proto> [ports]; print(design) in a stable order (per VPC: igw, subnets tier-major,
+                           cidr <range>, rule <from> -> <to> <proto> [ports] (an ec2/asg type only has to look like family.size; the
+                           checks warn about one the table lacks); print(design) in a stable order (per VPC: igw, subnets tier-major,
                            nats, instances, route tables by the tier they serve, groups; then address ranges; then rules); sync() = ensure_labels
                            + print into design.text; help() for the Text tab. Also: `spot`, `disk n`, `hours n` on ec2/asg (printed when not 730); `vpce <svc> in <vpc> [tier] [sg]`;
                            `s3 <name> [gb] [versioning] [lifecycle] [expire]`; `alb <name> internet|internal in <vpc> [tier] [sg] [port] [cert]
@@ -115,8 +119,8 @@ crates/core/src/           aib-core: no UI, no AWS calls
   pricing.rs               PRICES per region (NAT Gateway USD/h, per GB, idle EIP), instance_hourly (table for us-east-1 / ap-south-1, others
                            × 1.1), PUBLIC_IP_HOURLY, ROOT_VOLUME_MONTHLY, arm_equivalent, hours_of(node) (its `hours`, else 730: instances and
                            scaling groups are charged for those hours; the NAT and balancers for the month), recommend(vcpu, ram, gpu, region,
-                           hours) -> Candidate {type, vcpu, memory, arch, gpu, hourly, monthly at those hours, note} cheapest first (at least the
-                           vCPUs and memory asked; GPU types only when asked); cost(&Design) -> CostReport {items, total, advice,
+                           hours) -> Candidate {type, vcpu, memory, arch, gpu, hourly, monthly at those hours, note, fits} cheapest first (at least
+                           the vCPUs and memory asked; GPU types only when asked; when nothing fits, the three biggest with fits = false); cost(&Design) -> CostReport {items, total, advice,
                            assumptions}: NAT Gateways and instances (+ root volume + public IPv4) cost; advice = one shared NAT, unused NAT,
                            endpoints instead of NAT, tear down at night, stop instances outside working hours, Graviton instead of x86, drop
                            public addresses. Analysis.cost carries it; blocks show their price.
@@ -126,7 +130,8 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            instances} -> Imported {design, notes}: tiers from the routes (0.0.0.0/0 -> igw public, -> nat private, else
                            isolated), AZ letters from the AZ names, NATs in their subnet, main table drawn when a subnet uses it implicitly,
                            groups (egress "all" when AWS's allow-all is the only egress rule), one cidr block per range, a traffic arrow per
-                           permission (a mirrored pair once), instances with the OS guessed from the AMI name and their addresses
+                           permission (a mirrored pair once), instances with the OS guessed from the AMI name (deep learning [base],
+                           openvpn, jammy/22.04, ubuntu, debian, else al2023) and their addresses
                            (params address = public IPv4 or DNS, private_ip; for the Terminal tab); what was left out is noted.
                            Tested with a hand-built inventory; the AWS calls are in the app.
 app/src-tauri/src/term.rs  terminal sessions: portable-pty runs the system `ssh` (found on PATH, /usr/bin, /opt/homebrew/bin) in a
@@ -173,10 +178,14 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
                            "aib-arrange" event) sends the measured block sizes (rf.getNodes().measured). An instance block has
                            "Connect (SSH)" -> the "aib-connect" event -> the Terminal tab. Colours: COLORS by day,
                            neon(COLORS) at night through --c (useColor)
-  NewInstance.tsx          the "New instance" dialog (and "Recommend a type…" on an instance): vCPUs, memory, GPU, OS, hours a month
-                           (presets: always on 730, working hours 176, about 10 h a day 320, a few evenings 60, one day 8, custom) ->
-                           instance_recommend -> the table of types that fit, cheapest first, priced at those hours; Use -> design_add with
-                           {type, os, hours} (or the selected block's params). Adding an ec2 from the palette/menu opens it (Design.tsx add())
+  NewInstance.tsx          the "New instance" dialog (and "Recommend a type…" on an instance): vCPUs and memory as free numbers, GPU, OS /
+                           image (with its note), key pair name (datalist: ~/.ssh files, the design's names, "Names from AWS" = aws_key_pairs),
+                           hours a month (presets: always on 730, working hours 176, about 10 h a day 320, a few evenings 60, one day 8,
+                           custom) -> instance_recommend -> the table of types that fit, cheapest first, priced at those hours (x86 only
+                           for an x86-only image), or any type typed by hand; every doubt is a warning line, nothing is refused; Use ->
+                           design_add with {type, os, hours, key, disk ≥ the image's minimum} (or the selected block's params). Adding an
+                           ec2 from the palette/menu opens it (Design.tsx add()). The inspector's type is a free input with the table as
+                           suggestions (price when known) and the key field suggests the same names
   CodeTab.tsx              main.tf / variables.tf / outputs.tf from `code`, Copy, Export… (pick a folder)
   PlanTab.tsx              OpenTofu status / Install, account guard and budget, Plan / Plan destroy, the change table, Apply or Destroy
                            (typed project name when dangerous, budget tick), the live log, outputs. App.tsx polls job_status (startJob)

@@ -32,7 +32,11 @@ Apply after seeing the plan, and the Costs tab tells you beforehand what they co
 - **New instance by need:** adding an instance asks for vCPUs, memory, GPU or not, the OS and the hours a month it will run,
   and lists the types that fit, cheapest first, priced at those hours (Spot and Graviton noted). The estimate on the block, in
   the summary and in the Costs tab follows the hours you set (730 = always on; 176 = working hours), not a full month by
-  default; "Recommend a type…" on an existing instance opens the same dialog.
+  default; "Recommend a type…" on an existing instance opens the same dialog. Every value is yours to type: any vCPU or memory
+  number, any instance type name (one the app does not know gets a warning and no price, not a refusal), a key pair name with
+  the ones found in `~/.ssh` and in the account suggested. Images: Amazon Linux 2023, Ubuntu 24.04 and 22.04, Debian 12, the
+  Deep Learning AMI (PyTorch, CUDA) and Base AMI, OpenVPN Access Server; each says what it needs (x86 only, a 30 GiB root
+  volume, a GPU, the VPN ports) and the checks hold you to it.
 - **Terminal tab:** SSH into your instances from inside the app, like Termius. Every instance of the design is a host with the
   user its OS expects, the key pair's `.pem` file and its address (from the import, or from the outputs after Apply); press
   "Connect (SSH)" on an instance block, or save any other machine in the list. It runs your own `ssh` in a real terminal
