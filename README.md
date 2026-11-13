@@ -29,6 +29,10 @@ Apply after seeing the plan, and the Costs tab tells you beforehand what they co
   the nearest known instance type, Graviton for the same size, the public IP off (or on, with its price), the scaling group's sizes,
   a lifecycle rule. "Fix all safe ones" runs those that cost nothing and open nothing. "Allow SSH only from my current address" looks
   your public IP up (checkip.amazonaws.com) and puts it in an Address range block, leaving the web ports open as they were.
+- **Terminal tab:** SSH into your instances from inside the app, like Termius. Every instance of the design is a host with the
+  user its OS expects, the key pair's `.pem` file and its address (from the import, or from the outputs after Apply); press
+  "Connect (SSH)" on an instance block, or save any other machine in the list. It runs your own `ssh` in a real terminal
+  (xterm.js), so host keys, agents and `~/.ssh/config` work as they always do; the app never reads a key.
 - **Checks on every block:** VPC and subnet CIDRs between /16 and /28, inside the VPC, not overlapping; usable addresses shown as
   `2^(32−24) = 256 − 5 = 251`; a public subnet must route `0.0.0.0/0` to the Internet Gateway, a private one to a NAT Gateway, an
   isolated one nowhere; a NAT Gateway must be in a public subnet; a private subnet whose NAT is in another AZ gets a warning; one

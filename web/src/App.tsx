@@ -10,8 +10,9 @@ import { CostsTab } from "./CostsTab";
 import { CodeTab } from "./CodeTab";
 import { ConnectionTab } from "./ConnectionTab";
 import { AccountTab } from "./AccountTab";
+import { TerminalTab } from "./TerminalTab";
 
-type Tab = "project" | "design" | "text" | "code" | "plan" | "costs" | "account" | "connection";
+type Tab = "project" | "design" | "text" | "code" | "plan" | "costs" | "terminal" | "account" | "connection";
 
 export default function App() {
   const [st, setSt] = useState<AppState | null>(null);
@@ -87,7 +88,7 @@ export default function App() {
       if (j.state === "running") { window.setTimeout(tick, 600); return; }
       if (j.state === "done" && (j.kind === "apply" || j.kind === "destroy")) {
         // the created resources' ids go onto the blocks (a destroy clears them)
-        api.designSetAwsIds(j.aws_ids, j.kind === "destroy").then((l) => { setDesign(l.design); setAnalysis(l.analysis); }).catch(() => {});
+        api.designSetAwsIds(j.aws_ids, j.kind === "destroy", j.outputs).then((l) => { setDesign(l.design); setAnalysis(l.analysis); }).catch(() => {});
       }
       if (j.message) toast(j.message);
     };
@@ -104,7 +105,9 @@ export default function App() {
     reload().then((s) => (s.project ? loadProject().then(() => setTab("design")) : setTab("project"))).catch((e) => toast(errText(e)));
     const un = listen<string>("open-tab", (e) => setTab(e.payload as Tab));
     const un2 = listen<string>("menu", (e) => menuRef.current(e.payload));
-    return () => { [un, un2].forEach((u) => u.then((f) => f())); };
+    const onConnect = () => setTab("terminal");
+    window.addEventListener("aib-connect", onConnect);
+    return () => { [un, un2].forEach((u) => u.then((f) => f())); window.removeEventListener("aib-connect", onConnect); };
   }, [reload, loadProject, toast]);
 
   const typing = () => { const a = document.activeElement; return !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT"); };
@@ -147,7 +150,7 @@ export default function App() {
   };
 
   if (!st) return <div className="page muted">Loading…</div>;
-  const tabs: [Tab, string][] = [["design", "Design"], ["text", "Text"], ["code", "Code"], ["plan", "Plan & Apply"], ["costs", "Costs"]];
+  const tabs: [Tab, string][] = [["design", "Design"], ["text", "Text"], ["code", "Code"], ["plan", "Plan & Apply"], ["costs", "Costs"], ["terminal", "Terminal"]];
   const summary = analysis ? (analysis.ok ? (analysis.warnings ? `${analysis.warnings} warning${analysis.warnings > 1 ? "s" : ""}` : "design is clean") : `${analysis.errors} error${analysis.errors > 1 ? "s" : ""}`) : "";
 
   return (
@@ -171,9 +174,10 @@ export default function App() {
         {tab === "text" && design && <TextTab design={design} onApply={applyText} onFormat={() => design && persist(design)} />}
         {tab === "code" && design && analysis && <CodeTab design={design} analysis={analysis} toast={toast} />}
         {tab === "costs" && design && analysis && <CostsTab design={design} analysis={analysis} />}
+        <TerminalTab visible={tab === "terminal"} design={design} toast={toast} />
         {tab === "connection" && <ConnectionTab st={st} toast={toast} />}
         {tab === "account" && <AccountTab st={st} toast={toast} onImported={(notes) => reload().then(() => loadProject()).then(() => { setTab("design"); toast(notes.join("\n")); }).catch((e) => toast(errText(e)))} />}
-        {!["project", "connection", "account"].includes(tab) && !st.project && <div className="page muted">Open or create a project first.</div>}
+        {!["project", "connection", "account", "terminal"].includes(tab) && !st.project && <div className="page muted">Open or create a project first.</div>}
       </main>
       {msg && <div className="toast" onClick={() => setMsg("")}>{msg}</div>}
       {saving && st.project && <SaveAs st={st} name={st.project.name} onDone={(ok) => { setSaving(false); if (ok) reload().catch(() => {}); }} toast={toast} />}

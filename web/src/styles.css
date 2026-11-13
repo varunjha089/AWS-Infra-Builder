@@ -105,6 +105,22 @@ ul.tidy li strong { font-size: 12.5px; }
 ul.fixes { list-style: none; padding: 0; margin: 4px 0; }
 ul.fixes li { border-left: 3px solid var(--line); padding: 4px 8px; margin: 5px 0; background: var(--tint); border-radius: 0 6px 6px 0; }
 ul.fixes li.safe { border-left-color: var(--ok); }
+/* the Terminal tab */
+.term-page { width: 100%; height: 100%; }
+.hosts { width: 330px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--line); padding: 12px 14px; overflow: auto; }
+.hosts label { display: block; margin: 6px 0; font-size: 12.5px; color: var(--muted); }
+.hosts label input { display: block; width: 100%; box-sizing: border-box; margin-top: 2px; color: var(--ink); }
+.hosts .row label input { width: 100%; }
+.hosts .host { border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; margin: 6px 0; background: var(--tint); }
+.hosts .host .addr { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+.term-main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
+.term-tabs { display: flex; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--line); background: var(--panel); overflow-x: auto; flex-shrink: 0; }
+.term-tabs .ttab { display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--field); cursor: pointer; font-size: 13px; white-space: nowrap; }
+.term-tabs .ttab.on { background: var(--tab-on); color: var(--accent); }
+.term-tabs .ttab .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); } .term-tabs .ttab .dot.closed { background: var(--muted); }
+.term-tabs .ttab .x { border: 0; background: none; padding: 0 2px; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; }
+.term-holder { flex: 1; min-height: 0; position: relative; background: #fff; }
+.term-holder .term { position: absolute; inset: 6px; }
 div.fixes .fix { margin: 6px 0; }
 .react-flow__edge-path { stroke: var(--edge); stroke-width: 1.8; }
 .react-flow__edge.selected .react-flow__edge-path { stroke: var(--accent); stroke-width: 2.4; }
@@ -199,6 +215,10 @@ label.chk { display: flex; align-items: center; gap: 6px; }
 [data-theme="night"] ul.tidy li.tidy-delete { box-shadow: 0 0 8px -2px var(--muted); }
 [data-theme="night"] ul.fixes li { background: rgba(7,9,20,.55); box-shadow: 0 0 8px -2px var(--line); }
 [data-theme="night"] ul.fixes li.safe { box-shadow: 0 0 8px -2px var(--ok); }
+[data-theme="night"] .term-holder { background: #070914; box-shadow: inset 0 0 28px -14px #00e5ff; }
+[data-theme="night"] .term-tabs .ttab.on { box-shadow: 0 0 8px -2px #00e5ff; text-shadow: 0 0 6px #00e5ff; }
+[data-theme="night"] .term-tabs .ttab .dot { box-shadow: 0 0 6px var(--ok); } [data-theme="night"] .term-tabs .ttab .dot.closed { box-shadow: none; }
+[data-theme="night"] .hosts .host { background: rgba(7,9,20,.55); box-shadow: 0 0 8px -3px var(--line); }
 [data-theme="night"] .block { background: var(--node); box-shadow: 0 0 8px var(--c), 0 0 22px -6px var(--c), inset 0 0 10px -4px var(--c); }
 [data-theme="night"] .block .lh { background: transparent; color: var(--c); border-bottom: 1px solid var(--c); text-shadow: 0 0 4px var(--c), 0 0 12px var(--c); }
 [data-theme="night"] .block .lh .bl { color: #fff; opacity: 1; text-shadow: 0 0 6px var(--c); }

@@ -9,6 +9,7 @@ pub mod creds;
 pub mod dsl;
 pub mod fix;
 pub mod hcl;
+pub mod hosts;
 pub mod import;
 pub mod layout;
 pub mod model;

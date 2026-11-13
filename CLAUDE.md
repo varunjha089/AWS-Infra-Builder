@@ -4,14 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.5.2 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.6.0 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
 Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
 (nothing overlaps; `layout.rs`) and the Tidy-up recommendations (merge groups with the same rules, fold a group into the one
 whose rules contain its own, combine the launch-wizard groups, delete unused groups and ranges; `tidy.rs`). 0.5.2: Fix buttons
 (`fix.rs`): every problem the checks can repair has one, "Fix all safe ones" runs those that cost and open nothing; "allow SSH only
-from my address" looks the owner's address up at checkip.amazonaws.com.
+from my address" looks the owner's address up at checkip.amazonaws.com. 0.6.0: the Terminal tab (`hosts.rs`, `term.rs`,
+`TerminalTab.tsx`): SSH into the design's instances from the app, like Termius: the system `ssh` in a pseudo-terminal drawn
+with xterm.js, one host per instance (user from the OS, ~/.ssh/<key pair>.pem, the address from the import or the apply outputs),
+saved hosts in settings.json, "Connect (SSH)" on an instance block. The app never reads a key; ssh does.
 Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
@@ -58,6 +61,10 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            0.0.0.0/0 -> the arrow's source becomes an Address range "my_ip" <ip>/32), type (nearest_type: same size in
                            a family of the same letter, else t3.micro; GPU families -> g4dn.xlarge), graviton, public_ip_off/on,
                            asg_sizes, lifecycle. apply(design, fix, my_ip); apply_all_safe() re-lists after each. Analysis.fixes
+  hosts.rs                 Host {id, label, host, user, port, key (path, "~" allowed), block, aws_id, note}; guess_user(os) (al2023 ec2-user,
+                           ubuntu ubuntu, debian admin), default_key_path(key pair) = ~/.ssh/<name>.pem, suggest(design) = one Host per
+                           ec2 block (address from params.address, else a note why it cannot be reached yet), ssh_args(host, key path),
+                           check(host) (plain-words problems before ssh starts), saved()/save() = settings.json "hosts". No key is read
   cidr.rs                  Cidr: parse, contains, overlaps, usable (size − 5), is_private, next_free (aligned); random-input test
   checks.rs                analyse(&Design) -> Analysis {nodes: NodeResult{status, messages, info, summary}, edges, problems, ok, counts, az_spread,
                            az_names, cost}. Every rule has a message that says what to change. Non-network CIDRs are errors (AWS and the provider
@@ -98,8 +105,14 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            instances} -> Imported {design, notes}: tiers from the routes (0.0.0.0/0 -> igw public, -> nat private, else
                            isolated), AZ letters from the AZ names, NATs in their subnet, main table drawn when a subnet uses it implicitly,
                            groups (egress "all" when AWS's allow-all is the only egress rule), one cidr block per range, a traffic arrow per
-                           permission (a mirrored pair once), instances with the OS guessed from the AMI name; what was left out is noted.
+                           permission (a mirrored pair once), instances with the OS guessed from the AMI name and their addresses
+                           (params address = public IPv4 or DNS, private_ip; for the Terminal tab); what was left out is noted.
                            Tested with a hand-built inventory; the AWS calls are in the app.
+app/src-tauri/src/term.rs  terminal sessions: portable-pty runs the system `ssh` (found on PATH, /usr/bin, /opt/homebrew/bin) in a
+                           pseudo-terminal; a reader thread emits `term-data` {id, data (base64)} and `term-exit` {id, code} events;
+                           Terms {open, write, resize, close, open_ids}. expand_home("~/…"), key_problem(path) (missing, a folder, or
+                           readable by others: ssh refuses those), fix_key_permissions (mode 600). Tests: the key problems, and `sh -c echo`
+                           through a pty (no Tauri handle needed)
 app/src-tauri/src/tofu.rs  OpenTofu: locate() (settings tofu_path, <home>/bin/tofu, PATH, /opt/homebrew/bin; terraform too), install()
                            (official release zip for the OS/arch, SHA-256 checked against the published sums, unzipped into <home>/bin),
                            Jobs (one background job: JobSnap {state, kind, log, plan, outputs, marks block->creating/created/failed/
@@ -116,7 +129,10 @@ app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load,
                            design_connect, design_remove, text_help, code, export_code, pick_folder, open_url; tofu_status, tofu_install,
                            tofu_plan(destroy), tofu_apply(confirm, accept_budget) (guarded_ctx: live identity, account guard against
                            project.json "aws".account set by the first plan, region guard, budget guard), job_status(since),
-                           project_set_budget, design_set_aws_ids (the created ids onto the blocks); aws_state, aws_set_keys, aws_clear_keys,
+                           project_set_budget, design_set_aws_ids (the created ids onto the blocks, and from the outputs the instances'
+                           public/private addresses); hosts_state(design) {saved, suggested, ssh path}, hosts_save, key_check, key_fix,
+                           pick_file, term_open(id, host, cols, rows) (hosts::check + key_problem first; returns the ssh arguments),
+                           term_write, term_resize, term_close, term_list; aws_state, aws_set_keys, aws_clear_keys,
                            aws_select, aws_test, aws_list_vpcs, aws_import) and the menu (File/Edit/View/Design -> "menu" and "open-tab"
                            events). Every design command returns {design (synced), analysis}. Pasted keys live in the keychain (service
                            "AWS Infra Builder", items aws_key_id / aws_key_secret / aws_key_token), cached per launch; settings.json
@@ -129,7 +145,8 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
                            selected: the design's name/region/AZs, the summary, the cost, "Tidy up" (Analysis.recommendations with a
                            button each -> design_tidy, then the layout again), the problems and "Fixes" (Analysis.fixes, a Fix button
                            each and "Fix all safe ones" -> design_fix); a selected block or arrow shows its own fixes under its problems. Arrange (button, ⇧⌘A through the
-                           "aib-arrange" event) sends the measured block sizes (rf.getNodes().measured). Colours: COLORS by day,
+                           "aib-arrange" event) sends the measured block sizes (rf.getNodes().measured). An instance block has
+                           "Connect (SSH)" -> the "aib-connect" event -> the Terminal tab. Colours: COLORS by day,
                            neon(COLORS) at night through --c (useColor)
   CodeTab.tsx              main.tf / variables.tf / outputs.tf from `code`, Copy, Export… (pick a folder)
   PlanTab.tsx              OpenTofu status / Install, account guard and budget, Plan / Plan destroy, the change table, Apply or Destroy
@@ -137,6 +154,11 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
                            and passes the job to Design.tsx: plan-<action> / mark-<state> classes and a ribbon on each block, a legend
   TextTab.tsx              the .aib text with a line gutter; Apply (⌘↩) -> design_from_text; errors by line
   CostsTab.tsx             the monthly estimate per block, the advice, the assumptions
+  TerminalTab.tsx          the Termius part: hosts from the design (hosts_state.suggested) and saved hosts, a host form (label, address,
+                           user, port, key file with Choose… and the key check / Fix permissions), sessions as tabs, each an xterm.js
+                           Terminal + FitAddon in its own div (term-data bytes in, onData -> term_write, onResize -> term_resize). Always
+                           mounted (display none when another tab shows) so sessions survive a tab switch; the "aib-connect" event
+                           (Connect (SSH) on an instance block) opens the block's host, the saved copy first. Night theme = neon palette
   ConnectionTab.tsx        profiles (radio), pasted keys -> keychain, region, Test connection (identity), the read-only IAM policy
   AccountTab.tsx           List VPCs in a region, Import one -> new unsaved project, the import notes as a toast
   cidr.ts                  parse / nextFree for the inspector's proposal (the Rust side is the one that checks)
@@ -165,6 +187,9 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
 - Plan & Apply: never make the app apply without the shown plan, the typed name for destroys/replaces and the guards; the state file is the
   owner's (back it up, never delete it); the project's `tofu/` folder is program output and may be regenerated, except `terraform.tfstate`
   and `backups/`.
+- The Terminal tab: the app spawns the user's own `ssh` and never reads, copies or stores a private key (the path only, in
+  settings.json); host keys are checked by ssh as usual (the first-connection question is answered in the terminal). No test
+  connects anywhere; the pty test runs `sh -c echo`.
 - Night mode stays neon: a new screen or element gets its `[data-theme="night"]` rules (glow in --c or the cyan/magenta accents); day mode
   keeps its plain look.
 - Cost minimisation is a design rule: every block that costs money while idle shows its monthly price on the block, in the Costs tab and in

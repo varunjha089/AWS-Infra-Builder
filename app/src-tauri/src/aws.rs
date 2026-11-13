@@ -138,6 +138,8 @@ pub async fn inventory(creds: Creds, region: &str, vpc_id: &str, account: &str) 
             image_name: i.image_id().map(String::from),
             spot: i.instance_lifecycle().map(|l| l.as_str() == "spot").unwrap_or(false),
             disk: None,
+            address: i.public_ip_address().map(String::from).or_else(|| i.public_dns_name().filter(|s| !s.is_empty()).map(String::from)),
+            private_ip: i.private_ip_address().map(String::from),
         }).collect();
         // the AMI names, to guess each instance's OS (one call for all)
         let image_ids: Vec<String> = instances.iter().filter_map(|i| i.image_name.clone()).collect();

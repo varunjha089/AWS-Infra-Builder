@@ -3,12 +3,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod aws;
+mod term;
 mod tofu;
 
 use aib_core::checks::{self, Analysis};
 use aib_core::creds::{self, Source};
 use aib_core::dsl;
 use aib_core::hcl;
+use aib_core::hosts::{self, Host};
 use aib_core::import;
 use aib_core::model::{self, Design, ENDPOINT_SERVICES, INSTANCE_TYPES, KINDS, OS, PORTS, REGIONS, TIERS};
 use aib_core::store::{self, Project};
@@ -24,6 +26,7 @@ use tauri_plugin_dialog::DialogExt;
 struct App {
     project: Mutex<Option<Project>>,
     jobs: tofu::Jobs,
+    terms: term::Terms,
 }
 
 const SERVICE: &str = "AWS Infra Builder";
@@ -563,20 +566,113 @@ async fn tofu_apply(st: State<'_, App>, confirm: String, accept_budget: bool) ->
 
 /// after an apply: the AWS ids of the created resources go into the design (the blocks show them)
 #[tauri::command]
-fn design_set_aws_ids(st: State<'_, App>, ids: std::collections::HashMap<String, String>, clear: bool) -> R<Loaded> {
+fn design_set_aws_ids(st: State<'_, App>, ids: std::collections::HashMap<String, String>, clear: bool, outputs: Option<Vec<(String, String)>>) -> R<Loaded> {
     let p = project(&st)?;
     let mut d = p.design();
+    let outputs = outputs.unwrap_or_default();
     for n in d.nodes.iter_mut() {
         if clear {
             n.params.remove("aws_id");
+            n.params.remove("address");
+            n.params.remove("private_ip");
         }
         if let Some(id) = ids.get(&n.id) {
             n.params.insert("aws_id".into(), json!(id));
+        }
+        // output "instance_<label>" = {id, private_ip, public_ip}: the addresses for the Terminal tab
+        if n.kind == "ec2" {
+            if let Some((_, v)) = outputs.iter().find(|(k, _)| *k == format!("instance_{}", n.label)) {
+                if let Ok(o) = serde_json::from_str::<Value>(v) {
+                    if let Some(ip) = o["public_ip"].as_str().filter(|s| !s.is_empty()) {
+                        n.params.insert("address".into(), json!(ip));
+                    }
+                    if let Some(ip) = o["private_ip"].as_str().filter(|s| !s.is_empty()) {
+                        n.params.insert("private_ip".into(), json!(ip));
+                    }
+                }
+            }
         }
     }
     let l = loaded(d);
     p.save_design(&l.design).map_err(e)?;
     Ok(l)
+}
+
+// ---------------------------------------------------------------- terminal (the Termius part)
+#[tauri::command]
+fn hosts_state(design: Option<Design>) -> Value {
+    let suggested = design.map(|d| hosts::suggest(&d)).unwrap_or_default();
+    json!({"saved": hosts::saved(), "suggested": suggested, "ssh": which("ssh")})
+}
+
+fn which(program: &str) -> Option<String> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let found = path.split(':').chain(["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]).map(|d| PathBuf::from(d).join(program)).find(|p| p.is_file());
+    found.map(|p| p.to_string_lossy().into())
+}
+
+#[tauri::command]
+fn hosts_save(hosts: Vec<Host>) -> R<Vec<Host>> {
+    hosts::save(&hosts).map_err(e)?;
+    Ok(hosts::saved())
+}
+
+/// what is wrong with the key file, if anything
+#[tauri::command]
+fn key_check(path: String) -> Option<String> {
+    term::key_problem(&path)
+}
+
+#[tauri::command]
+fn key_fix(path: String) -> R<Option<String>> {
+    term::fix_key_permissions(&path)?;
+    Ok(term::key_problem(&path))
+}
+
+#[tauri::command]
+async fn pick_file(app: tauri::AppHandle) -> R<Option<String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog().file().pick_file(move |f| {
+        let _ = tx.send(f.map(|p| p.to_string()));
+    });
+    tauri::async_runtime::spawn_blocking(move || rx.recv().map_err(e)).await.map_err(e)?
+}
+
+/// start ssh to the host in a new terminal; the window then listens for term-data / term-exit events with this id
+#[tauri::command]
+fn term_open(app: tauri::AppHandle, st: State<'_, App>, id: String, host: Host, cols: u16, rows: u16) -> R<Vec<String>> {
+    let problem = hosts::check(&host);
+    if !problem.is_empty() {
+        return Err(problem);
+    }
+    if let Some(p) = term::key_problem(&host.key) {
+        return Err(p);
+    }
+    let ssh = which("ssh").ok_or("ssh was not found. On macOS it comes with the system (/usr/bin/ssh); on Linux install openssh-client.")?;
+    let key = if host.key.trim().is_empty() { None } else { Some(term::expand_home(&host.key)) };
+    let args = hosts::ssh_args(&host, key.as_deref());
+    st.terms.open(app, &id, &ssh, &args, cols, rows)?;
+    Ok(args)
+}
+
+#[tauri::command]
+fn term_write(st: State<'_, App>, id: String, data: String) -> R<()> {
+    st.terms.write(&id, &data)
+}
+
+#[tauri::command]
+fn term_resize(st: State<'_, App>, id: String, cols: u16, rows: u16) -> R<()> {
+    st.terms.resize(&id, cols, rows)
+}
+
+#[tauri::command]
+fn term_close(st: State<'_, App>, id: String) {
+    st.terms.close(&id)
+}
+
+#[tauri::command]
+fn term_list(st: State<'_, App>) -> Vec<String> {
+    st.terms.open_ids()
 }
 
 // ---------------------------------------------------------------- menu
@@ -619,6 +715,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &item("tab-code", "Code", Some("CmdOrCtrl+3"))?,
         &item("tab-plan", "Plan & Apply", Some("CmdOrCtrl+4"))?,
         &item("tab-costs", "Costs", Some("CmdOrCtrl+7"))?,
+        &item("tab-terminal", "Terminal", Some("CmdOrCtrl+8"))?,
         &item("tab-account", "Account", Some("CmdOrCtrl+5"))?,
         &item("tab-connection", "Connection", Some("CmdOrCtrl+6"))?,
         &item("tab-project", "Projects", Some("CmdOrCtrl+0"))?,
@@ -648,7 +745,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 fn on_menu(app: &tauri::AppHandle, id: &str) {
     match id {
-        "tab-design" | "tab-text" | "tab-code" | "tab-plan" | "tab-costs" | "tab-account" | "tab-connection" | "tab-project" => { let _ = app.emit("open-tab", id.trim_start_matches("tab-")); }
+        "tab-design" | "tab-text" | "tab-code" | "tab-plan" | "tab-costs" | "tab-terminal" | "tab-account" | "tab-connection" | "tab-project" => { let _ = app.emit("open-tab", id.trim_start_matches("tab-")); }
         other => { let _ = app.emit("menu", other); }
     }
 }
@@ -656,7 +753,7 @@ fn on_menu(app: &tauri::AppHandle, id: &str) {
 fn main() {
     // an unsaved draft does not outlive the app (also after a crash)
     let _ = store::discard_draft();
-    let app = App { project: Mutex::new(store::last_project()), jobs: tofu::Jobs::default() };
+    let app = App { project: Mutex::new(store::last_project()), jobs: tofu::Jobs::default(), terms: term::Terms::default() };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(app)
@@ -670,7 +767,8 @@ fn main() {
             app_state, project_new, project_open, project_from_template, project_save_as, project_close, project_forget, set_projects_dir, pick_folder,
             project_load, save_design, design_from_text, design_arrange, design_tidy, design_fix, design_add, design_connect, design_remove, text_help, code, export_code, open_url,
             aws_state, aws_set_keys, aws_clear_keys, aws_select, aws_test, aws_list_vpcs, aws_import,
-            tofu_status, tofu_install, tofu_plan, tofu_apply, job_status, project_set_budget, design_set_aws_ids
+            tofu_status, tofu_install, tofu_plan, tofu_apply, job_status, project_set_budget, design_set_aws_ids,
+            hosts_state, hosts_save, key_check, key_fix, pick_file, term_open, term_write, term_resize, term_close, term_list
         ])
         .build(tauri::generate_context!())
         .expect("error while running AWS Infra Builder")

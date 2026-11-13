@@ -29,6 +29,8 @@ export interface JobSnap { state: "idle" | "running" | "done" | "failed"; kind: 
 export interface TofuStatus { tofu: string | null; version: string | null; install_version: string; source: string; identity: Identity | null; project_account: string | null; budget: number | null;
   state: { has_state: boolean; resources: number; last_apply: string | null; backups: number; plan_fresh: boolean; plan_destroy: boolean } }
 export interface Loaded { design: Design; analysis: Analysis }
+export interface Host { id: string; label: string; host: string; user: string; port: number; key: string; block: string | null; aws_id: string | null; note: string }
+export interface HostsState { saved: Host[]; suggested: Host[]; ssh: string | null }
 export interface TextError { line: number; message: string }
 
 export interface ProjectInfo { name: string; path: string; draft: boolean }
@@ -69,7 +71,17 @@ export const api = {
   tofuApply: (confirm: string, acceptBudget: boolean) => invoke<void>("tofu_apply", { confirm, acceptBudget }),
   job: (since: number) => invoke<JobSnap>("job_status", { since }),
   projectSetBudget: (budget: number | null) => invoke<void>("project_set_budget", { budget }),
-  designSetAwsIds: (ids: Record<string, string>, clear: boolean) => invoke<Loaded>("design_set_aws_ids", { ids, clear }),
+  designSetAwsIds: (ids: Record<string, string>, clear: boolean, outputs?: [string, string][]) => invoke<Loaded>("design_set_aws_ids", { ids, clear, outputs: outputs ?? null }),
+  hostsState: (design: Design | null) => invoke<HostsState>("hosts_state", { design }),
+  hostsSave: (hosts: Host[]) => invoke<Host[]>("hosts_save", { hosts }),
+  keyCheck: (path: string) => invoke<string | null>("key_check", { path }),
+  keyFix: (path: string) => invoke<string | null>("key_fix", { path }),
+  pickFile: () => invoke<string | null>("pick_file"),
+  termOpen: (id: string, host: Host, cols: number, rows: number) => invoke<string[]>("term_open", { id, host, cols, rows }),
+  termWrite: (id: string, data: string) => invoke<void>("term_write", { id, data }),
+  termResize: (id: string, cols: number, rows: number) => invoke<void>("term_resize", { id, cols, rows }),
+  termClose: (id: string) => invoke<void>("term_close", { id }),
+  termList: () => invoke<string[]>("term_list"),
   exportCode: () => invoke<string>("export_code"),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
   awsState: () => invoke<AwsState>("aws_state"),
