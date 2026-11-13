@@ -234,6 +234,12 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                     l.params.insert("spot".into(), json!(true));
                     rest.remove(i);
                 }
+                "hours" if kw == "ec2" || kw == "asg" => {
+                    match rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                        Some(h) if (1..=744).contains(&h) => { l.params.insert("hours".into(), json!(h)); rest.drain(i..i + 2); }
+                        _ => { errors.push(err(ln, "hours: write how many hours a month it runs, 1 to 744, such as `hours 176` (730 = always on)")); break; }
+                    }
+                }
                 "disk" if kw == "ec2" || kw == "asg" => {
                     match rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
                         Some(g) if (8..=16384).contains(&g) => { l.params.insert("disk".into(), json!(g)); rest.drain(i..i + 2); }
@@ -270,7 +276,7 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                         errors.push(err(ln, format!("ec2: \"{t}\" is not an instance type the app knows ({} …)", crate::model::INSTANCE_TYPES.iter().take(4).map(|i| i.0).collect::<Vec<_>>().join(", "))));
                     }
                     l.params.insert("type".into(), json!(t));
-                    for (k, v) in [("os", json!("al2023")), ("key", json!("")), ("public_ip", json!(false)), ("spot", json!(false)), ("disk", json!(8))] {
+                    for (k, v) in [("os", json!("al2023")), ("key", json!("")), ("public_ip", json!(false)), ("spot", json!(false)), ("disk", json!(8)), ("hours", json!(730))] {
                         l.params.entry(k).or_insert(v);
                     }
                 }
@@ -291,7 +297,7 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                         errors.push(err(ln, format!("asg: \"{t}\" is not an instance type the app knows")));
                     }
                     l.params.insert("type".into(), json!(t));
-                    for (k, v) in [("os", json!("al2023")), ("key", json!("")), ("tier", json!("private")), ("min", json!(1)), ("max", json!(2)), ("desired", json!(1)), ("spot", json!(false)), ("disk", json!(8))] {
+                    for (k, v) in [("os", json!("al2023")), ("key", json!("")), ("tier", json!("private")), ("min", json!(1)), ("max", json!(2)), ("desired", json!(1)), ("spot", json!(false)), ("disk", json!(8)), ("hours", json!(730))] {
                         l.params.entry(k).or_insert(v);
                     }
                 }
@@ -539,6 +545,7 @@ pub fn print(d: &Design) -> String {
                 if !p(n, "key").is_empty() { s.push_str(&format!(" key {}", p(n, "key"))); }
                 if n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false) { s.push_str(" spot"); }
                 if let Some(g) = n.params.get("disk").and_then(|v| v.as_u64()).filter(|g| *g != 8) { s.push_str(&format!(" disk {g}")); }
+                if let Some(h) = n.params.get("hours").and_then(|v| v.as_u64()).filter(|h| *h != 730) { s.push_str(&format!(" hours {h}")); }
                 if !p(n, "os").is_empty() && p(n, "os") != "al2023" { s.push_str(&format!(" os {}", p(n, "os"))); }
                 s
             }
@@ -559,6 +566,7 @@ pub fn print(d: &Design) -> String {
                 if n.params.get("public_ip").and_then(|v| v.as_bool()).unwrap_or(false) { s.push_str(" public"); }
                 if n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false) { s.push_str(" spot"); }
                 if let Some(g) = n.params.get("disk").and_then(|v| v.as_u64()).filter(|g| *g != 8) { s.push_str(&format!(" disk {g}")); }
+                if let Some(h) = n.params.get("hours").and_then(|v| v.as_u64()).filter(|h| *h != 730) { s.push_str(&format!(" hours {h}")); }
                 if !p(n, "os").is_empty() && p(n, "os") != "al2023" { s.push_str(&format!(" os {}", p(n, "os"))); }
                 s
             }
@@ -632,12 +640,12 @@ pub fn help() -> Vec<(String, String)> {
         ("nat <name> in <subnet>".into(), "a NAT Gateway in a public subnet".into()),
         ("rt <name> in <vpc>: <dest> -> <gateway>, …".into(), "a route table and its routes".into()),
         ("sg <name> in <vpc> [egress all|rules]".into(), "a security group; egress all = AWS's default, rules = only what the rules say".into()),
-        ("ec2 <name> <type> in <subnet> [sg a,b] [key <pair>] [public] [spot] [disk <GiB>] [os al2023|ubuntu|debian]".into(), "an instance; public = a public IPv4 address (costs money); spot = about 70 % cheaper, may be interrupted".into()),
+        ("ec2 <name> <type> in <subnet> [sg a,b] [key <pair>] [public] [spot] [disk <GiB>] [hours <n>] [os al2023|ubuntu|debian]".into(), "an instance; public = a public IPv4 address (costs money); spot = about 70 % cheaper, may be interrupted; hours = how many hours a month it runs (730 = always on), the price follows it".into()),
         ("cidr <name> <range>".into(), "an address range outside the design, such as `cidr internet 0.0.0.0/0`".into()),
         ("vpce <name> <service> in <vpc> [tier <tier>] [sg <group>]".into(), "a VPC endpoint: s3 and dynamodb are free gateway endpoints (route `pl-s3 -> name` from a table); the rest are interface endpoints in the tier's subnets".into()),
         ("s3 <name> [gb <GB>] [versioning] [lifecycle ia-30|glacier-90|ia-30-glacier-90] [expire <days>]".into(), "a bucket with public access blocked and encryption on; gb is for the estimate".into()),
         ("alb <name> <internet|internal> in <vpc> [tier t] [sg g] [port 80|443] [cert <ACM arn>] [health /path]".into(), "an Application Load Balancer in the tier's subnets (two AZs); HTTPS when a certificate is named".into()),
-        ("asg <name> <type> in <vpc> [tier t] [min n] [max n] [desired n] [sg a,b] [key k] [spot] [disk n] [os x]".into(), "an Auto Scaling group of instances in the tier's subnets".into()),
+        ("asg <name> <type> in <vpc> [tier t] [min n] [max n] [desired n] [sg a,b] [key k] [spot] [disk n] [hours n] [os x]".into(), "an Auto Scaling group of instances in the tier's subnets".into()),
         ("target <balancer> -> <group|instance> <port>".into(), "the balancer sends requests to the group or instance on that port".into()),
         ("rule <from> -> <to> <tcp|udp|icmp|all> [port|range|name]".into(), "traffic the target lets in from the source (and the source lets out)".into()),
         ("# …".into(), "a comment".into()),

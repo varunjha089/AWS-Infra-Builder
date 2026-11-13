@@ -7,6 +7,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api, errText, type Sizes, type Analysis, type AppState, type DNode, type Design, type EdgeResult, type JobSnap, type Loaded, type NodeResult } from "./api";
+import { NewInstance, HOUR_PRESETS, hoursText } from "./NewInstance";
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
 import { neon, useTheme } from "./theme";
 
@@ -201,8 +202,19 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
       parent = cur?.id ?? (kind === "nat" ? design.nodes.find((n) => n.kind === "subnet" && n.params.tier === "public")?.id : undefined) ?? design.nodes.find((n) => n.kind === want)?.id ?? null;
       if (!parent) { toast(want === "vpc" ? "Add a VPC first: every other block lives in one." : kind === "ec2" ? "An instance lives in a subnet: add a subnet first." : "A NAT Gateway lives in a (public) subnet: add a subnet first."); return; }
     }
+    if (kind === "ec2" && parent) { setNewInst({ parent }); return; }
     api.designAdd(design, kind, parent).then((l) => { apply(l); if (l.id) setSelectId(l.id); }).catch((e) => toast(errText(e)));
   }, [design, parentKind, selectId, apply, toast, setSelectId]);
+  /** the New-instance dialog: for a new block in a subnet, or "change" for the selected instance */
+  const [newInst, setNewInst] = useState<{ parent: string } | "change" | null>(null);
+  const pickInstance = (c: { type: string; os: string; hours: number }) => {
+    if (newInst === "change" && selectId) {
+      change({ ...design, nodes: design.nodes.map((n) => (n.id === selectId ? { ...n, params: { ...n.params, ...c } } : n)) }, false);
+    } else if (newInst && newInst !== "change") {
+      api.designAdd(design, "ec2", newInst.parent, c).then((l) => { apply(l); if (l.id) setSelectId(l.id); }).catch((e) => toast(errText(e)));
+    }
+    setNewInst(null);
+  };
   useEffect(() => {
     const h = (e: Event) => add((e as CustomEvent<string>).detail);
     window.addEventListener("aib-add", h);
@@ -254,6 +266,9 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
 
   return (
     <div className="design">
+      {newInst && <NewInstance st={st} region={design.region} toast={toast} title={newInst === "change" ? "Recommend an instance type" : "New instance: what must it have?"}
+        initial={newInst === "change" && selected ? { os: String(selected.params.os ?? "al2023"), hours: Number(selected.params.hours ?? 730), gpu: /^[gp]/.test(String(selected.params.type ?? "")), vcpu: st.instance_types.find((t) => t.type === selected.params.type)?.vcpu ?? 2, ram: st.instance_types.find((t) => t.type === selected.params.type)?.memory ?? 1 } : undefined}
+        onPick={pickInstance} onClose={() => setNewInst(null)} />}
       <aside className="palette">
         <h4>Scope</h4>
         <button className="pal" style={pal("vpc")} onClick={() => add("vpc")}>VPC<small>a private network in the region</small></button>
@@ -366,7 +381,14 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
               </>}
               {selected.kind === "ec2" && <>
                 <label>Instance type<select value={String(selected.params.type ?? "t4g.micro")} onChange={(e) => setParam(selected.id, "type", e.target.value, false)}>
-                  {st.instance_types.map((t) => { const h = design.region === "us-east-1" ? t.us_east_1 : design.region === "ap-south-1" ? t.ap_south_1 : t.us_east_1 * 1.1; return <option key={t.type} value={t.type}>{t.type} · {t.vcpu} vCPU · {t.memory} GiB · {t.arch} · USD {(h * 730).toFixed(0)}/month</option>; })}</select></label>
+                  {st.instance_types.map((t) => { const h = design.region === "us-east-1" ? t.us_east_1 : design.region === "ap-south-1" ? t.ap_south_1 : t.us_east_1 * 1.1; return <option key={t.type} value={t.type}>{t.type} · {t.vcpu} vCPU · {t.memory} GiB · {t.arch} · USD {(h * Number(selected.params.hours ?? 730)).toFixed(0)}/month at {Number(selected.params.hours ?? 730)} h</option>; })}</select></label>
+                <div className="row" style={{ alignItems: "flex-end" }}>
+                  <label style={{ flex: 1 }}>Hours a month it runs (the price follows this)<select value={HOUR_PRESETS.some(([v]) => v === Number(selected.params.hours ?? 730)) ? Number(selected.params.hours ?? 730) : "custom"} onChange={(e) => setParam(selected.id, "hours", e.target.value === "custom" ? 100 : Number(e.target.value), false)}>
+                    {HOUR_PRESETS.map(([v, t]) => <option key={v} value={v}>{t}</option>)}<option value="custom">custom…</option></select></label>
+                  <button className="small" onClick={() => setNewInst("change")}>Recommend a type…</button>
+                </div>
+                {!HOUR_PRESETS.some(([v]) => v === Number(selected.params.hours ?? 730)) && <label>Hours (1 to 744)<input type="number" min={1} max={744} value={Number(selected.params.hours ?? 730)} onChange={(e) => setParam(selected.id, "hours", Math.max(1, Math.min(744, Number(e.target.value) || 1)))} /></label>}
+                <div className="small muted">{hoursText(Number(selected.params.hours ?? 730))}: stop the instance when it is not in use (only the volume is charged then), or the estimate will not hold.</div>
                 <label>Operating system<select value={String(selected.params.os ?? "al2023")} onChange={(e) => setParam(selected.id, "os", e.target.value, false)}>{st.os.map((o) => <option key={o.key} value={o.key}>{o.title}</option>)}</select></label>
                 <label>Key pair (an existing EC2 key pair name; empty = none, use SSM)<input value={String(selected.params.key ?? "")} onChange={(e) => setParam(selected.id, "key", e.target.value)} /></label>
                 <label className="inline"><input type="checkbox" checked={!!selected.params.public_ip} onChange={(e) => setParam(selected.id, "public_ip", e.target.checked, false)} />Public IPv4 address (USD 3.65 a month)</label>

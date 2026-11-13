@@ -7,6 +7,39 @@ use serde::{Deserialize, Serialize};
 
 pub const HOURS: f64 = 730.0;
 
+/// how many hours a month the block runs: its `hours` (1 to 744), else all month
+pub fn hours_of(n: &crate::model::Node) -> f64 {
+    n.params.get("hours").and_then(|v| v.as_f64()).filter(|h| (1.0..=744.0).contains(h)).unwrap_or(HOURS)
+}
+
+/// an instance type that fits what was asked (at least the vCPUs and memory, GPU or not), cheapest first
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Candidate {
+    pub r#type: String,
+    pub vcpu: u8,
+    pub memory: f64,
+    pub arch: String,
+    pub gpu: bool,
+    pub hourly: f64,
+    /// at the asked hours a month
+    pub monthly: f64,
+    pub note: String,
+}
+
+pub fn recommend(vcpu: u8, ram: f64, gpu: bool, region: &str, hours: f64) -> Vec<Candidate> {
+    let hours = if hours.is_finite() { hours.clamp(1.0, 744.0) } else { HOURS };
+    let mut v: Vec<Candidate> = crate::model::INSTANCE_TYPES.iter().filter(|i| i.1 >= vcpu && i.2 >= ram && crate::model::is_gpu(i.0) == gpu).map(|i| {
+        let h = instance_hourly(i.0, region);
+        Candidate { r#type: i.0.into(), vcpu: i.1, memory: i.2, arch: i.3.into(), gpu, hourly: h, monthly: h * hours, note: String::new() }
+    }).collect();
+    v.sort_by(|a, b| a.hourly.partial_cmp(&b.hourly).unwrap_or(std::cmp::Ordering::Equal));
+    for (k, c) in v.iter_mut().enumerate() {
+        c.note = if k == 0 { "cheapest that fits".into() } else if c.arch == "arm64" { "Graviton (arm64): Linux only, most software has arm builds".into() } else if c.vcpu > vcpu || c.memory > ram { "more than asked".into() } else { "x86_64".into() };
+    }
+    v.truncate(8);
+    v
+}
+
 /// (region, NAT Gateway USD/hour, NAT data processing USD/GB, idle Elastic IP USD/hour)
 const PRICES: &[(&str, f64, f64, f64)] = &[
     ("us-east-1", 0.045, 0.045, 0.005),
@@ -149,19 +182,20 @@ pub fn cost(d: &Design) -> CostReport {
             }
         }
         if n.kind == "asg" {
+            let hours = hours_of(n);
             let t = n.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let spot = n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
             let desired = n.params.get("desired").and_then(|v| v.as_f64()).unwrap_or(1.0);
             let disk = n.params.get("disk").and_then(|v| v.as_f64()).unwrap_or(8.0);
             let h = instance_hourly(t, &region) * if spot { SPOT_FACTOR } else { 1.0 };
-            let monthly = desired * (h * HOURS + disk * GP3_PER_GIB);
+            let monthly = desired * (h * hours + disk * GP3_PER_GIB);
             items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
-                note: format!("{desired:.0} × {t}{}: {h:.4} USD/h × {HOURS:.0} h + {disk:.0} GiB each = {} a month at the desired size (more when it scales out)", if spot { " spot" } else { "" }, money(monthly)) });
+                note: format!("{desired:.0} × {t}{}: {h:.4} USD/h × {hours:.0} h + {disk:.0} GiB each = {} a month at the desired size (more when it scales out)", if spot { " spot" } else { "" }, money(monthly)) });
             if !spot && desired >= 2.0 {
                 advice.push(format!("{}: instances in an Auto Scaling group behind a balancer are replaceable, so Spot is safe there and saves about {} a month.", n.label, money(monthly * (1.0 - SPOT_FACTOR))));
             }
             if let Some(arm) = arm_equivalent(t) {
-                let save = (instance_hourly(t, &region) - instance_hourly(arm, &region)) * HOURS * desired * if spot { SPOT_FACTOR } else { 1.0 };
+                let save = (instance_hourly(t, &region) - instance_hourly(arm, &region)) * hours * desired * if spot { SPOT_FACTOR } else { 1.0 };
                 if save > 0.0 {
                     x86.push((n.label.clone(), arm, save));
                 }
@@ -173,23 +207,24 @@ pub fn cost(d: &Design) -> CostReport {
                 note: format!("{:.0} GB stored ({}): {} a month; requests and transfer out are extra", n.params.get("gb").and_then(|v| v.as_f64()).unwrap_or(0.0), n.params.get("lifecycle").and_then(|v| v.as_str()).unwrap_or("none"), money(monthly)) });
         }
         if n.kind == "ec2" {
+            let hours = hours_of(n);
             let t = n.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let spot = n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
             let h = instance_hourly(t, &region) * if spot { SPOT_FACTOR } else { 1.0 };
             let disk = n.params.get("disk").and_then(|v| v.as_f64()).unwrap_or(8.0);
             let public = n.params.get("public_ip").and_then(|v| v.as_bool()).unwrap_or(false);
-            let ip = if public { PUBLIC_IP_HOURLY * HOURS } else { 0.0 };
-            let monthly = h * HOURS + disk * GP3_PER_GIB + ip;
+            let ip = if public { PUBLIC_IP_HOURLY * hours } else { 0.0 };
+            let monthly = h * hours + disk * GP3_PER_GIB + ip;
             items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
-                note: format!("{t}{}: {h:.4} USD/h × {HOURS:.0} h = {} running all month, + {} for the {disk:.0} GiB root volume{}", if spot { " (spot, about 30 % of on-demand)" } else { "" }, money(h * HOURS), money(disk * GP3_PER_GIB), if public { format!(", + {} for the public IPv4 address", money(ip)) } else { String::new() }) });
+                note: format!("{t}{}: {h:.4} USD/h × {hours:.0} h = {} running {hours:.0} h a month, + {} for the {disk:.0} GiB root volume{}", if spot { " (spot, about 30 % of on-demand)" } else { "" }, money(h * hours), money(disk * GP3_PER_GIB), if public { format!(", + {} for the public IPv4 address", money(ip)) } else { String::new() }) });
             if !spot && instance_type(t).map(|it| it.0.starts_with('g') || it.0.starts_with('p')).unwrap_or(false) {
-                advice.push(format!("{} is a GPU instance on demand ({} a month running all the time). Spot saves about 70 % for training that checkpoints and resumes (NN Builder does): tick Spot.", n.label, money(instance_hourly(t, &region) * HOURS)));
+                advice.push(format!("{} is a GPU instance on demand ({} a month running all the time). Spot saves about 70 % for training that checkpoints and resumes (NN Builder does): tick Spot.", n.label, money(instance_hourly(t, &region) * hours)));
             }
             if public {
                 public_ips += 1;
             }
             if let Some(arm) = arm_equivalent(t) {
-                let save = (h - instance_hourly(arm, &region)) * HOURS;
+                let save = (h - instance_hourly(arm, &region)) * hours;
                 if save > 0.0 {
                     x86.push((n.label.clone(), arm, save));
                 }
@@ -244,7 +279,7 @@ pub fn cost(d: &Design) -> CostReport {
         advice,
         region,
         assumptions: vec![
-            format!("On-demand list prices for {} ({} USD/h per NAT Gateway), {HOURS:.0} hours a month, no traffic.", d.region, nat_h),
+            format!("On-demand list prices for {} ({} USD/h per NAT Gateway), {HOURS:.0} hours a month (an instance that says how many hours it runs is charged for those), no traffic.", d.region, nat_h),
             "Data transfer is not included: NAT processing and internet egress are charged per GB.".into(),
             "Free: VPC, subnets, Internet Gateway, route tables, security groups. An Elastic IP costs USD 0.005/h; the one a NAT Gateway uses is included above.".into(),
             "Instances: on-demand Linux prices (us-east-1 and ap-south-1 from the table; other regions as us-east-1 × 1.1), the gp3 root volume at USD 0.08 per GiB-month, a public IPv4 address at USD 0.005/h when turned on. Spot is taken as 30 % of on-demand (it moves between about 10 and 40 %, and the instance can be interrupted). Savings Plans come later.".into(),
@@ -256,6 +291,24 @@ pub fn cost(d: &Design) -> CostReport {
 mod tests {
     use super::*;
     use crate::templates;
+
+    #[test]
+    fn recommends_the_cheapest_type_that_fits_at_the_asked_hours() {
+        let r = recommend(2, 4.0, false, "ap-south-1", 176.0);
+        assert_eq!(r[0].r#type, "t4g.medium");
+        assert!((r[0].monthly - 0.0336 * 176.0).abs() < 0.001);
+        assert!(r.iter().all(|c| c.vcpu >= 2 && c.memory >= 4.0 && !c.gpu));
+        assert_eq!(recommend(4, 16.0, true, "ap-south-1", 730.0)[0].r#type, "g4dn.xlarge");
+        assert!(recommend(64, 1.0, false, "us-east-1", 730.0).is_empty());
+        assert_eq!(recommend(1, 0.5, false, "us-east-1", 10000.0)[0].monthly, 0.0042 * 744.0);
+        let mut d = crate::dsl::parse("net \"h\"\nregion ap-south-1\nazs 1\n\nvpc main 10.0.0.0/16\nsubnet a public 10.0.0.0/24 az a in main\nec2 box t4g.micro in a hours 176\n", None).unwrap();
+        let c = cost(&d);
+        let item = c.items.iter().find(|i| i.label == "box").unwrap();
+        assert!((item.monthly - (0.0084 * 176.0 + 8.0 * 0.08)).abs() < 0.001, "{}", item.monthly);
+        assert!(item.note.contains("× 176 h"));
+        d.nodes.iter_mut().find(|n| n.label == "box").unwrap().params.remove("hours");
+        assert!(cost(&d).items.iter().find(|i| i.label == "box").unwrap().note.contains("× 730 h"));
+    }
 
     #[test]
     fn two_tier_costs_two_nats_and_advises_one() {

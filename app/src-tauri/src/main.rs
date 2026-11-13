@@ -225,11 +225,25 @@ fn design_tidy(st: State<'_, App>, mut design: Design, id: String, sizes: Option
 }
 
 #[tauri::command]
-fn design_add(st: State<'_, App>, mut design: Design, kind: String, parent: Option<String>) -> R<Value> {
+fn design_add(st: State<'_, App>, mut design: Design, kind: String, parent: Option<String>, params: Option<Value>) -> R<Value> {
     let id = design.add(&kind, parent.as_deref());
+    // the New-instance dialog's choices (type, os, hours) onto the new block
+    if let (Some(id), Some(Value::Object(m))) = (&id, params) {
+        if let Some(n) = design.node_mut(id) {
+            for (k, v) in m {
+                n.params.insert(k, v);
+            }
+        }
+    }
     let l = loaded(design);
     project(&st)?.save_design(&l.design).map_err(e)?;
     Ok(json!({"design": l.design, "analysis": l.analysis, "id": id}))
+}
+
+/// the instance types that fit what was asked, cheapest first, priced at the hours a month
+#[tauri::command]
+fn instance_recommend(vcpu: u8, ram: f64, gpu: bool, hours: f64, region: Option<String>) -> Vec<aib_core::pricing::Candidate> {
+    aib_core::pricing::recommend(vcpu, ram, gpu, &region.unwrap_or_else(|| "ap-south-1".into()), hours)
 }
 
 #[tauri::command]
@@ -810,7 +824,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             app_state, project_new, project_open, project_from_template, project_save_as, project_close, project_forget, set_projects_dir, pick_folder,
-            project_load, save_design, design_from_text, design_arrange, design_tidy, design_fix, design_add, design_connect, design_remove, text_help, code, export_code, open_url,
+            project_load, save_design, design_from_text, design_arrange, design_tidy, design_fix, design_add, instance_recommend, design_connect, design_remove, text_help, code, export_code, open_url,
             aws_state, aws_set_keys, aws_clear_keys, aws_select, aws_test, aws_list_vpcs, aws_import,
             tofu_status, tofu_install, tofu_plan, tofu_apply, job_status, project_set_budget, design_set_aws_ids,
             hosts_state, hosts_save, key_check, key_fix, pick_file, term_open, term_write, term_resize, term_close, term_list,

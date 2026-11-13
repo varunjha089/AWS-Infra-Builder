@@ -136,8 +136,28 @@ pub const INSTANCE_TYPES: &[(&str, u8, f64, &str, f64, f64)] = &[
     ("c6g.large", 2, 4.0, "arm64", 0.068, 0.0712),
     ("c5.large", 2, 4.0, "x86_64", 0.085, 0.089),
     ("r6g.large", 2, 16.0, "arm64", 0.1008, 0.1056),
+    ("t4g.xlarge", 4, 16.0, "arm64", 0.1344, 0.1344),
+    ("t4g.2xlarge", 8, 32.0, "arm64", 0.2688, 0.2688),
+    ("t3.xlarge", 4, 16.0, "x86_64", 0.1664, 0.1792),
+    ("t3.2xlarge", 8, 32.0, "x86_64", 0.3328, 0.3584),
+    ("m6g.xlarge", 4, 16.0, "arm64", 0.154, 0.1632),
+    ("m6g.2xlarge", 8, 32.0, "arm64", 0.308, 0.3264),
+    ("m5.xlarge", 4, 16.0, "x86_64", 0.192, 0.202),
+    ("c6g.xlarge", 4, 8.0, "arm64", 0.136, 0.1424),
+    ("c5.xlarge", 4, 8.0, "x86_64", 0.17, 0.178),
+    ("r6g.xlarge", 4, 32.0, "arm64", 0.2016, 0.2112),
+    ("r6g.2xlarge", 8, 64.0, "arm64", 0.4032, 0.4224),
+    // GPU: g4dn = one T4 (16 GB), g5 = one A10G (24 GB); for training that checkpoints, Spot is about 30 % of these
     ("g4dn.xlarge", 4, 16.0, "x86_64", 0.526, 0.526),
+    ("g4dn.2xlarge", 8, 32.0, "x86_64", 0.752, 0.752),
+    ("g5.xlarge", 4, 16.0, "x86_64", 1.006, 1.006),
+    ("g5.2xlarge", 8, 32.0, "x86_64", 1.212, 1.212),
 ];
+
+/// a GPU instance type (the g and p families)
+pub fn is_gpu(t: &str) -> bool {
+    t.starts_with('g') || t.starts_with('p')
+}
 
 pub fn instance_type(t: &str) -> Option<&'static (&'static str, u8, f64, &'static str, f64, f64)> {
     INSTANCE_TYPES.iter().find(|i| i.0 == t)
@@ -206,7 +226,7 @@ pub fn defaults(kind: &str) -> Params {
         "sg" => json!({"egress": "all", "description": ""}),
         // the cheapest type that runs a small service; no public address unless asked (an IPv4 address costs money)
         // spot: about 70 % cheaper, may be interrupted (for work that can be stopped and resumed); disk: the root volume in GiB
-        "ec2" => json!({"type": "t4g.micro", "os": "al2023", "key": "", "public_ip": false, "sgs": [], "spot": false, "disk": 8}),
+        "ec2" => json!({"type": "t4g.micro", "os": "al2023", "key": "", "public_ip": false, "sgs": [], "spot": false, "disk": 8, "hours": 730}),
         "cidr" => json!({"cidr": "0.0.0.0/0"}),
         // a gateway endpoint for S3 by default (free); interface endpoints name the tier whose subnets get the interfaces and a group
         "vpce" => json!({"service": "s3", "tier": "private", "sg": ""}),
@@ -215,7 +235,7 @@ pub fn defaults(kind: &str) -> Params {
         // an internet-facing ALB in the public subnets; HTTP on 80 until a certificate (ACM ARN) is named, then HTTPS on 443
         "alb" => json!({"scheme": "internet", "tier": "public", "sg": "", "port": 80, "cert": "", "health": "/"}),
         // the cheapest type, two instances in the private subnets, scaling to four
-        "asg" => json!({"type": "t4g.micro", "os": "al2023", "key": "", "tier": "private", "min": 1, "max": 2, "desired": 1, "sgs": [], "spot": false, "disk": 8}),
+        "asg" => json!({"hours": 730, "type": "t4g.micro", "os": "al2023", "key": "", "tier": "private", "min": 1, "max": 2, "desired": 1, "sgs": [], "spot": false, "disk": 8}),
         _ => json!({}),
     };
     v.as_object().cloned().unwrap_or_default()

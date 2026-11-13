@@ -159,7 +159,7 @@ pub fn fixes(d: &Design) -> Vec<Fix> {
             None => out.push(fix("type", n, format!("Use {} instead of {t}", nearest_type(t)), "the nearest type the app knows; change it in the inspector if another fits", true)),
             Some(it) if it.3 == "x86_64" => {
                 if let Some(arm) = crate::pricing::arm_equivalent(t) {
-                    let save = (crate::pricing::instance_hourly(t, &d.region) - crate::pricing::instance_hourly(arm, &d.region)) * crate::pricing::HOURS;
+                    let save = (crate::pricing::instance_hourly(t, &d.region) - crate::pricing::instance_hourly(arm, &d.region)) * crate::pricing::hours_of(n);
                     if save > 0.0 {
                         out.push(fix("graviton", n, format!("Use {arm} (Graviton) and save USD {save:.2} a month"), "arm64: most Linux software runs unchanged, but a running instance would be replaced with a new AMI", false));
                     }

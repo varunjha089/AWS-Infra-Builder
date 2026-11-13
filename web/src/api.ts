@@ -31,6 +31,7 @@ export interface TofuStatus { tofu: string | null; version: string | null; insta
 export interface Loaded { design: Design; analysis: Analysis }
 export interface Host { id: string; label: string; host: string; user: string; port: number; key: string; block: string | null; aws_id: string | null; note: string }
 export interface HostsState { saved: Host[]; suggested: Host[]; ssh: string | null }
+export interface Candidate { type: string; vcpu: number; memory: number; arch: string; gpu: boolean; hourly: number; monthly: number; note: string }
 export interface KeyFile { path: string; name: string; kind: string }
 export interface KeyPair { name: string; kind: string; fingerprint: string; file: string | null }
 export interface TextError { line: number; message: string }
@@ -62,7 +63,8 @@ export const api = {
   designArrange: (design: Design, sizes?: Sizes) => invoke<Loaded>("design_arrange", { design, sizes: sizes ?? null }),
   designFix: (design: Design, id: string | null, allSafe: boolean, sizes?: Sizes) => invoke<Loaded & { done: number }>("design_fix", { design, id, allSafe, sizes: sizes ?? null }),
   designTidy: (design: Design, id: string, sizes?: Sizes) => invoke<Loaded>("design_tidy", { design, id, sizes: sizes ?? null }),
-  designAdd: (design: Design, kind: string, parent: string | null) => invoke<Loaded & { id: string | null }>("design_add", { design, kind, parent }),
+  designAdd: (design: Design, kind: string, parent: string | null, params?: Params) => invoke<Loaded & { id: string | null }>("design_add", { design, kind, parent, params: params ?? null }),
+  instanceRecommend: (vcpu: number, ram: number, gpu: boolean, hours: number, region?: string) => invoke<Candidate[]>("instance_recommend", { vcpu, ram, gpu, hours, region: region ?? null }),
   designConnect: (design: Design, source: string, target: string) => invoke<Loaded & { id: string | null }>("design_connect", { design, source, target }),
   designRemove: (design: Design, nodes: string[], edges: string[]) => invoke<Loaded>("design_remove", { design, nodes, edges }),
   textHelp: () => invoke<[string, string][]>("text_help"),

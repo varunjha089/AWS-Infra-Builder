@@ -410,10 +410,10 @@ pub fn analyse(d: &Design) -> Analysis {
             None => cx.error(&n.id, format!("\"{t}\" is not an instance type the app knows. Choose one in the inspector.")),
             Some(it) => {
                 let hourly = crate::pricing::instance_hourly(t, &d.region);
-                info.entry(n.id.clone()).or_default().push(format!("{t}: {} vCPU, {} GiB, {} · USD {hourly:.4}/h × {:.0} h = USD {:.2} a month while running", it.1, it.2, it.3, crate::pricing::HOURS, hourly * crate::pricing::HOURS));
+                info.entry(n.id.clone()).or_default().push(format!("{t}: {} vCPU, {} GiB, {} · USD {hourly:.4}/h × {:.0} h = USD {:.2} a month while running", it.1, it.2, it.3, crate::pricing::hours_of(n), hourly * crate::pricing::hours_of(n)));
                 if it.3 == "x86_64" {
                     if let Some(arm) = crate::pricing::arm_equivalent(t) {
-                        let save = (hourly - crate::pricing::instance_hourly(arm, &d.region)) * crate::pricing::HOURS;
+                        let save = (hourly - crate::pricing::instance_hourly(arm, &d.region)) * crate::pricing::hours_of(n);
                         if save > 0.0 {
                             info.entry(n.id.clone()).or_default().push(format!("{arm} (Graviton, same size) would save USD {save:.2} a month; most Linux software runs on arm64 unchanged."));
                         }
@@ -450,7 +450,7 @@ pub fn analyse(d: &Design) -> Analysis {
         if ssh_in && p(n, "key").trim().is_empty() {
             cx.warn(&n.id, "SSH is allowed in, but no key pair is named: you could not log in. Name an existing EC2 key pair, or use SSM Session Manager instead of SSH.");
         }
-        summary.insert(n.id.clone(), format!("{t}{} · {} · USD {:.0}/month{}", if spot { " spot" } else { "" }, p(n, "os"), crate::pricing::instance_hourly(t, &d.region) * if spot { crate::pricing::SPOT_FACTOR } else { 1.0 } * crate::pricing::HOURS + if public_ip { 3.65 } else { 0.0 }, if public_ip { " · public IP" } else { "" }));
+        summary.insert(n.id.clone(), format!("{t}{} · {} · USD {:.0}/month{}", if spot { " spot" } else { "" }, p(n, "os"), crate::pricing::instance_hourly(t, &d.region) * if spot { crate::pricing::SPOT_FACTOR } else { 1.0 } * crate::pricing::hours_of(n) + if public_ip { 3.65 } else { 0.0 }, if public_ip { " · public IP" } else { "" }));
         info.entry(n.id.clone()).or_default().push(format!("Security groups: {}", if sgs.is_empty() { "none (the VPC's default)".to_string() } else { sgs.iter().map(|g| g.label.clone()).collect::<Vec<_>>().join(", ") }));
     }
 

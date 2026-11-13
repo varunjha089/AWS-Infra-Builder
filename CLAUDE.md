@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.6.1 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.7.0 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
 Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
@@ -18,7 +18,10 @@ saved hosts in settings.json, "Connect (SSH)" on an instance block. The app neve
 key files of ~/.ssh offered (by name only), "Move it into ~/.ssh (mode 600)" for a key chosen elsewhere, a new key pair made in
 AWS (ec2:CreateKeyPair, free: the one write outside Apply) with its key written once to ~/.ssh/<name>.pem, the account's key
 pairs listed with whether the file is here; a Fix moves a NAT Gateway out of a private subnet (the "Spot the mistakes"
-template is now fully repaired by "Fix all safe ones").
+template is now fully repaired by "Fix all safe ones"). 0.7.0: adding an instance asks what it must have (vCPUs, memory,
+GPU or not, OS, hours a month) and offers the types that fit, cheapest first (`pricing::recommend`, `NewInstance.tsx`;
+"Recommend a type…" on an existing block); every instance and scaling group has `hours` (default 730) and its estimate follows
+them instead of a full month; the type table gained the xlarge/2xlarge sizes and the g5 GPU family.
 Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
@@ -39,9 +42,10 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            the parent); Edge {kind "attach" | "route" | "traffic" | "target", params.dest | proto + ports | port}; KINDS (vpc,
                            subnet, igw, nat, rt, sg, ec2, cidr, vpce, s3, alb, asg) with the kind each lives in ("" = the region); REGIONS with AZ
                            counts; PORTS by name; ENDPOINT_SERVICES (gateway | interface); ec2/asg params type, os, key, public_ip, sgs, spot, disk
-                           (+ asg: tier, min, max, desired); alb params scheme, tier, sg, port, cert, health; s3 params gb, versioning, lifecycle,
+                           (+ asg: tier, min, max, desired), hours (1..=744, 730 = always on; the price follows it); alb params scheme, tier, sg, port, cert, health; s3 params gb, versioning, lifecycle,
                            expire_days; vpce params service, tier, sg;
-                           INSTANCE_TYPES (vCPU, GiB, arch, USD/h us-east-1 and ap-south-1; t2 and t3.nano included for imports); OS (AMI owner + name pattern); parse_ports,
+                           INSTANCE_TYPES (vCPU, GiB, arch, USD/h us-east-1 and ap-south-1; t2 and t3.nano included for imports; xlarge/2xlarge
+                           sizes and the g4dn/g5 GPU types for the recommendations), is_gpu(type); OS (AMI owner + name pattern); parse_ports,
                            traffic_label; add() (next free CIDR, balanced AZ; ec2 defaults to t4g.micro, no public IP), connect() (edge_kind
                            decides; a traffic arrow = the target's ingress and the source's egress), remove() (with contents), ensure_labels(),
                            arrange() = layout::arrange
@@ -82,7 +86,7 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            containers grow); lines vpc, subnet, igw, nat, rt, sg [egress rules], ec2 <type> [sg a,b] [key k] [public] [os x],
                            cidr <range>, rule <from> -> <to> <proto> [ports]; print(design) in a stable order (per VPC: igw, subnets tier-major,
                            nats, instances, route tables by the tier they serve, groups; then address ranges; then rules); sync() = ensure_labels
-                           + print into design.text; help() for the Text tab. Also: `spot`, `disk n` on ec2/asg; `vpce <svc> in <vpc> [tier] [sg]`;
+                           + print into design.text; help() for the Text tab. Also: `spot`, `disk n`, `hours n` on ec2/asg (printed when not 730); `vpce <svc> in <vpc> [tier] [sg]`;
                            `s3 <name> [gb] [versioning] [lifecycle] [expire]`; `alb <name> internet|internal in <vpc> [tier] [sg] [port] [cert]
                            [health]`; `asg <name> <type> in <vpc> [tier] [min] [max] [desired] [sg] …`; `target <alb> -> <asg|ec2> <port>`. Only an
                            `rt` line has routes after `:` (ARNs hold colons).
@@ -102,7 +106,10 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            projects (project.json + design.json; an imported project's project.json has "aws": {account, region, vpc_id}),
                            the one unsaved draft (<home>/draft) for templates and imports, save_as, listing (canonical paths)
   pricing.rs               PRICES per region (NAT Gateway USD/h, per GB, idle EIP), instance_hourly (table for us-east-1 / ap-south-1, others
-                           × 1.1), PUBLIC_IP_HOURLY, ROOT_VOLUME_MONTHLY, arm_equivalent; cost(&Design) -> CostReport {items, total, advice,
+                           × 1.1), PUBLIC_IP_HOURLY, ROOT_VOLUME_MONTHLY, arm_equivalent, hours_of(node) (its `hours`, else 730: instances and
+                           scaling groups are charged for those hours; the NAT and balancers for the month), recommend(vcpu, ram, gpu, region,
+                           hours) -> Candidate {type, vcpu, memory, arch, gpu, hourly, monthly at those hours, note} cheapest first (at least the
+                           vCPUs and memory asked; GPU types only when asked); cost(&Design) -> CostReport {items, total, advice,
                            assumptions}: NAT Gateways and instances (+ root volume + public IPv4) cost; advice = one shared NAT, unused NAT,
                            endpoints instead of NAT, tear down at night, stop instances outside working hours, Graviton instead of x86, drop
                            public addresses. Analysis.cost carries it; blocks show their price.
@@ -134,7 +141,7 @@ app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sd
                            inventory() (VPC, subnets, IGWs, NATs, route tables, security groups, instances, AMI names) with a 60 s timeout
                            and readable errors. Only Describe* and GetCallerIdentity. One real test (`#[ignore]`, AWS_INFRA_BUILDER_REAL=1 with
                            the default profile) prints the account's first VPC as .aib.
-app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load, save_design, design_from_text, design_arrange(sizes), design_tidy(id, sizes), design_fix(id | all_safe, sizes; my_ip() via ureq when the fix needs it; lays out again when blocks came or went), design_add,
+app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load, save_design, design_from_text, design_arrange(sizes), design_tidy(id, sizes), design_fix(id | all_safe, sizes; my_ip() via ureq when the fix needs it; lays out again when blocks came or went), design_add(kind, parent, params: the dialog's type/os/hours onto the new block), instance_recommend(vcpu, ram, gpu, hours, region),
                            design_connect, design_remove, text_help, code, export_code, pick_folder, open_url; tofu_status, tofu_install,
                            tofu_plan(destroy), tofu_apply(confirm, accept_budget) (guarded_ctx: live identity, account guard against
                            project.json "aws".account set by the first plan, region guard, budget guard), job_status(since),
@@ -159,6 +166,10 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
                            "aib-arrange" event) sends the measured block sizes (rf.getNodes().measured). An instance block has
                            "Connect (SSH)" -> the "aib-connect" event -> the Terminal tab. Colours: COLORS by day,
                            neon(COLORS) at night through --c (useColor)
+  NewInstance.tsx          the "New instance" dialog (and "Recommend a type…" on an instance): vCPUs, memory, GPU, OS, hours a month
+                           (presets: always on 730, working hours 176, about 10 h a day 320, a few evenings 60, one day 8, custom) ->
+                           instance_recommend -> the table of types that fit, cheapest first, priced at those hours; Use -> design_add with
+                           {type, os, hours} (or the selected block's params). Adding an ec2 from the palette/menu opens it (Design.tsx add())
   CodeTab.tsx              main.tf / variables.tf / outputs.tf from `code`, Copy, Export… (pick a folder)
   PlanTab.tsx              OpenTofu status / Install, account guard and budget, Plan / Plan destroy, the change table, Apply or Destroy
                            (typed project name when dangerous, budget tick), the live log, outputs. App.tsx polls job_status (startJob)
@@ -208,6 +219,8 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
   keeps its plain look.
 - Cost minimisation is a design rule: every block that costs money while idle shows its monthly price on the block, in the Costs tab and in
   the summary, with the cheaper alternative and what it costs in return. Templates default to the cheapest design that does the job.
+  An instance's price is for the hours it says it runs (`hours`, 730 by default); a new instance is chosen from what it must have,
+  cheapest type first.
 - No real AWS calls in the automatic tests; the one `#[ignore]` test runs only with AWS_INFRA_BUILDER_REAL=1 and only reads.
 - Keep every check's message in plain words with what to change; red only for what AWS refuses or a contradiction, yellow otherwise.
 - The design computer designs: no AWS calls outside an explicit, reviewed Apply (phase 2+); credentials only in the keychain (phase 2+).
