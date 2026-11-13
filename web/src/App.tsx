@@ -122,8 +122,8 @@ export default function App() {
       persist(target);
       if (tab !== "design") setTab("design");
     } else if (id === "arrange" && d) {
-      api.designArrange(d).then(apply).then(() => setSignal((s) => ({ fit: s.fit + 1 }))).catch((e) => toast(errText(e)));
       setTab("design");
+      window.setTimeout(() => window.dispatchEvent(new CustomEvent("aib-arrange")), 50);
     } else if (id === "fit") {
       setTab("design"); setSignal((s) => ({ fit: s.fit + 1 }));
     } else if (id.startsWith("add-") && d) {

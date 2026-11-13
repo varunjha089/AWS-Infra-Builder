@@ -10,10 +10,13 @@ export interface NodeResult { id: string; kind: string; title: string; status: "
 export interface EdgeResult { id: string; status: "ok" | "warn" | "error"; messages: string[]; label: string }
 export interface CostItem { id: string; label: string; kind: string; monthly: number; note: string }
 export interface CostReport { items: CostItem[]; total: number; advice: string[]; region: string; assumptions: string[] }
+export interface Recommendation { id: string; kind: "delete" | "merge" | "combine"; title: string; detail: string; keep: string | null; drop: string[]; label: string | null; widens: string[] }
 export interface Analysis {
   nodes: NodeResult[]; edges: EdgeResult[]; problems: string[]; ok: boolean; errors: number; warnings: number;
-  counts: Record<string, number>; az_spread: number; az_names: string[]; cost: CostReport;
+  counts: Record<string, number>; az_spread: number; az_names: string[]; recommendations: Recommendation[]; cost: CostReport;
 }
+/** block id -> [width, height] as the canvas measured them; the Rust side lays out with these */
+export type Sizes = Record<string, [number, number]>;
 export interface Profile { name: string; kind: string; region: string | null; key_hint: string | null }
 export type Source = { kind: "none" } | { kind: "profile"; name: string } | { kind: "keys" };
 export interface Identity { account: string; arn: string; user_id: string; region: string; checked: number }
@@ -51,7 +54,8 @@ export const api = {
   load: () => invoke<Loaded>("project_load"),
   saveDesign: (design: Design) => invoke<Loaded>("save_design", { design }),
   designFromText: (text: string) => invoke<{ ok: boolean; design?: Design; analysis?: Analysis; errors: TextError[] }>("design_from_text", { text }),
-  designArrange: (design: Design) => invoke<Loaded>("design_arrange", { design }),
+  designArrange: (design: Design, sizes?: Sizes) => invoke<Loaded>("design_arrange", { design, sizes: sizes ?? null }),
+  designTidy: (design: Design, id: string, sizes?: Sizes) => invoke<Loaded>("design_tidy", { design, id, sizes: sizes ?? null }),
   designAdd: (design: Design, kind: string, parent: string | null) => invoke<Loaded & { id: string | null }>("design_add", { design, kind, parent }),
   designConnect: (design: Design, source: string, target: string) => invoke<Loaded & { id: string | null }>("design_connect", { design, source, target }),
   designRemove: (design: Design, nodes: string[], edges: string[]) => invoke<Loaded>("design_remove", { design, nodes, edges }),

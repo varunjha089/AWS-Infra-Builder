@@ -4,10 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.5.0 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.5.1 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
-Balancer + Auto Scaling group with target arrows. Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
+Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
+(nothing overlaps; `layout.rs`) and the Tidy-up recommendations (merge groups with the same rules, fold a group into the one
+whose rules contain its own, combine the launch-wizard groups, delete unused groups and ranges; `tidy.rs`).
+Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
 another account (account guard) or the estimate exceeds the project's budget without a tick (budget guard). The app draws VPCs, subnets, Internet/NAT Gateways, route tables, security groups with
@@ -32,7 +35,20 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            INSTANCE_TYPES (vCPU, GiB, arch, USD/h us-east-1 and ap-south-1); OS (AMI owner + name pattern); parse_ports,
                            traffic_label; add() (next free CIDR, balanced AZ; ec2 defaults to t4g.micro, no public IP), connect() (edge_kind
                            decides; a traffic arrow = the target's ingress and the source's egress), remove() (with contents), ensure_labels(),
-                           arrange() (AZ columns × tier rows per VPC, route tables then groups below, address ranges left of the VPCs)
+                           arrange() = layout::arrange
+  layout.rs                the layout, innermost block first: estimate() guesses every block's drawn size from the text it shows (the
+                           canvas sends the measured sizes with Arrange and Tidy; they win); arrange_with(design, sizes): a subnet's
+                           contents in a near-square grid and the subnet grows around them; per VPC the gateways/endpoints/balancers on
+                           top, the subnet grid (AZ columns × tier rows, a column as wide as its widest subnet, a row as tall as its
+                           tallest), then route tables, then groups, each wrapped at max(grid width, 5 blocks); the VPC grows around
+                           it all; address ranges in a column left of the VPCs. no_overlap() is the test's check
+  tidy.rs                  Recommendation {id, kind delete|merge|combine, title, detail, keep, drop, label, widens}; recommend(design):
+                           unused groups (not "default": AWS keeps it) and unused ranges -> delete; used groups with the same rules
+                           (ingress keys "<cidr or group>|proto|ports" + egress) -> merge, nothing opens; a group whose rules are part of
+                           another's -> fold in, `widens` lists what its members would newly let in; the launch-wizard groups of a VPC
+                           -> combine into one "servers" (the union; widens per group). apply(design, rec): members' sgs/sg switch to
+                           the kept group, arrows move over once each, egress "all" if any folded group had it, the rest deleted.
+                           Analysis.recommendations carries the list; the app re-finds a recommendation by id before applying
   cidr.rs                  Cidr: parse, contains, overlaps, usable (size − 5), is_private, next_free (aligned); random-input test
   checks.rs                analyse(&Design) -> Analysis {nodes: NodeResult{status, messages, info, summary}, edges, problems, ok, counts, az_spread,
                            az_names, cost}. Every rule has a message that says what to change. Non-network CIDRs are errors (AWS and the provider
@@ -87,7 +103,7 @@ app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sd
                            inventory() (VPC, subnets, IGWs, NATs, route tables, security groups, instances, AMI names) with a 60 s timeout
                            and readable errors. Only Describe* and GetCallerIdentity. One real test (`#[ignore]`, AWS_INFRA_BUILDER_REAL=1 with
                            the default profile) prints the account's first VPC as .aib.
-app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load, save_design, design_from_text, design_arrange, design_add,
+app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load, save_design, design_from_text, design_arrange(sizes), design_tidy(id, sizes), design_add,
                            design_connect, design_remove, text_help, code, export_code, pick_folder, open_url; tofu_status, tofu_install,
                            tofu_plan(destroy), tofu_apply(confirm, accept_budget) (guarded_ctx: live identity, account guard against
                            project.json "aws".account set by the first plan, region guard, budget guard), job_status(since),
@@ -100,8 +116,11 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
   App.tsx                  top bar, tabs (Design, Text), Projects page (templates, new, list), Save-as modal, undo/redo snapshots, menu events
   Design.tsx               the canvas: "box" nodes (vpc, subnet; NodeResizer) and "block" nodes (igw, nat, rt, sg, ec2, cidr), nested by parentId;
                            drop re-parents by geometry (dropTarget); palette; inspector (label, params, Propose free CIDR, instance type with
-                           price, OS, key pair, public IP, group ticks, egress mode, rule protocol/ports, facts, problems). Colours: COLORS by
-                           day, neon(COLORS) at night through --c (useColor)
+                           price, OS, key pair, public IP, group ticks, egress mode, rule protocol/ports, facts, problems). With nothing
+                           selected: the design's name/region/AZs, the summary, the cost, "Tidy up" (Analysis.recommendations with a
+                           button each -> design_tidy, then the layout again) and the problems. Arrange (button, ⇧⌘A through the
+                           "aib-arrange" event) sends the measured block sizes (rf.getNodes().measured). Colours: COLORS by day,
+                           neon(COLORS) at night through --c (useColor)
   CodeTab.tsx              main.tf / variables.tf / outputs.tf from `code`, Copy, Export… (pick a folder)
   PlanTab.tsx              OpenTofu status / Install, account guard and budget, Plan / Plan destroy, the change table, Apply or Destroy
                            (typed project name when dangerous, budget tick), the live log, outputs. App.tsx polls job_status (startJob)

@@ -176,9 +176,19 @@ fn design_from_text(st: State<'_, App>, text: String) -> R<Value> {
     }
 }
 
+/// `sizes`: the canvas's measured block sizes (id -> [w, h]); the estimate stands in for blocks it does not name
 #[tauri::command]
-fn design_arrange(st: State<'_, App>, mut design: Design) -> R<Loaded> {
-    model::arrange(&mut design);
+fn design_arrange(st: State<'_, App>, mut design: Design, sizes: Option<aib_core::layout::Sizes>) -> R<Loaded> {
+    aib_core::layout::arrange_with(&mut design, &sizes.unwrap_or_default());
+    save_design(st, design)
+}
+
+/// carry out one of the analysis's recommendations (by its id), then lay the design out again
+#[tauri::command]
+fn design_tidy(st: State<'_, App>, mut design: Design, id: String, sizes: Option<aib_core::layout::Sizes>) -> R<Loaded> {
+    let rec = aib_core::tidy::recommend(&design).into_iter().find(|r| r.id == id).ok_or_else(|| "The design changed since that recommendation was made; look at the list again.".to_string())?;
+    aib_core::tidy::apply(&mut design, &rec);
+    aib_core::layout::arrange_with(&mut design, &sizes.unwrap_or_default());
     save_design(st, design)
 }
 
@@ -629,7 +639,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             app_state, project_new, project_open, project_from_template, project_save_as, project_close, project_forget, set_projects_dir, pick_folder,
-            project_load, save_design, design_from_text, design_arrange, design_add, design_connect, design_remove, text_help, code, export_code, open_url,
+            project_load, save_design, design_from_text, design_arrange, design_tidy, design_add, design_connect, design_remove, text_help, code, export_code, open_url,
             aws_state, aws_set_keys, aws_clear_keys, aws_select, aws_test, aws_list_vpcs, aws_import,
             tofu_status, tofu_install, tofu_plan, tofu_apply, job_status, project_set_budget, design_set_aws_ids
         ])

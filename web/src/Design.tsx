@@ -6,7 +6,7 @@ import {
   MarkerType, type Connection, type Edge, type EdgeChange, type Node, type NodeChange, type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { api, errText, type Analysis, type AppState, type DNode, type Design, type EdgeResult, type JobSnap, type Loaded, type NodeResult } from "./api";
+import { api, errText, type Sizes, type Analysis, type AppState, type DNode, type Design, type EdgeResult, type JobSnap, type Loaded, type NodeResult } from "./api";
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
 import { neon, useTheme } from "./theme";
 
@@ -209,6 +209,19 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
     return () => window.removeEventListener("aib-add", h);
   }, [add]);
 
+  /** the blocks' sizes as drawn, so Arrange and Tidy lay out with the real text heights (a block it has not drawn gets the estimate) */
+  const measured = useCallback((): Sizes => Object.fromEntries(rf.getNodes().filter((n) => n.type === "block" && n.measured?.width && n.measured?.height).map((n) => [n.id, [n.measured!.width!, n.measured!.height!] as [number, number]])), [rf]);
+  const arrange = useCallback(() => {
+    api.designArrange(design, measured()).then(apply).then(() => window.setTimeout(() => rf.fitView({ padding: 0.15, duration: 300 }), 60)).catch((e) => toast(errText(e)));
+  }, [design, measured, apply, rf, toast]);
+  useEffect(() => {
+    window.addEventListener("aib-arrange", arrange);
+    return () => window.removeEventListener("aib-arrange", arrange);
+  }, [arrange]);
+  const tidy = useCallback((id: string) => {
+    api.designTidy(design, id, measured()).then((l) => { apply(l); setSelectId(null); toast("Done. The design was laid out again; ⌘Z undoes it."); }).catch((e) => toast(errText(e)));
+  }, [design, measured, apply, toast, setSelectId]);
+
   const selected = selectId ? design.nodes.find((n) => n.id === selectId) : undefined;
   const result = selected ? analysis.nodes.find((r) => r.id === selected.id) : undefined;
   const edge = selEdge ? design.edges.find((e) => e.id === selEdge) : undefined;
@@ -254,7 +267,7 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
         <h4>Arrows</h4>
         <p className="small muted" style={{ margin: "4px 0" }}>Subnet → route table: the subnet uses it. Route table → gateway: a route. Group or range → group: the target lets that traffic in (ports in the inspector).</p>
         <h4>Layout</h4>
-        <button className="pal" style={pal("rt")} onClick={() => api.designArrange(design).then(apply).then(() => window.setTimeout(() => rf.fitView({ padding: 0.15, duration: 300 }), 60)).catch((e) => toast(errText(e)))}>Arrange<small>AZ columns × tier rows (⇧⌘A)</small></button>
+        <button className="pal" style={pal("rt")} onClick={arrange}>Arrange<small>innermost first: every block its own room (⇧⌘A)</small></button>
         <button className="pal" style={pal("rt")} onClick={() => rf.fitView({ padding: 0.15, duration: 300 })}>Fit to window<small>⇧⌘F</small></button>
       </aside>
       <div className="canvas">
@@ -397,6 +410,15 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
               <span className="pill">{analysis.az_spread} AZ{analysis.az_spread === 1 ? "" : "s"} used</span></div>
             <h4>Cost</h4>
             <p className="small"><strong>≈ USD {analysis.cost.total.toFixed(2)} a month</strong> while idle (estimate, {analysis.cost.region}). {analysis.cost.advice[0] ?? ""}</p>
+            {analysis.recommendations.length > 0 && <>
+              <h4>Tidy up <span className="pill warn">{analysis.recommendations.length}</span></h4>
+              <ul className="tidy">{analysis.recommendations.map((r) => <li key={r.id} className={`tidy-${r.kind}`}>
+                <div className="row" style={{ margin: 0, justifyContent: "space-between" }}><strong>{r.title}</strong><button className="small primary" onClick={() => tidy(r.id)}>{r.kind === "delete" ? "Delete" : r.kind === "combine" ? "Combine" : "Merge"}</button></div>
+                <div className="small muted">{r.detail}</div>
+                {r.widens.length > 0 && <div className="small st-warn">Opens more: {r.widens.join(" · ")}</div>}
+              </li>)}</ul>
+              <p className="small muted">Each one is one undo step. Merged groups keep the kept group's name; the instances switch over; the arrows move once each.</p>
+            </>}
             <h4>Problems</h4>
             {analysis.problems.length === 0 ? <p className="st-ok">None: every CIDR fits, every subnet routes as its tier says.</p>
               : <ul className="problems">{analysis.problems.map((m, i) => <li key={i} className={analysis.errors && i < analysis.errors ? "" : ""}>{m}</li>)}</ul>}

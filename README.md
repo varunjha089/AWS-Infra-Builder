@@ -17,6 +17,13 @@ Apply after seeing the plan, and the Costs tab tells you beforehand what they co
 - **Design tab:** a VPC is a box; subnets are boxes inside it, laid out as Availability-Zone columns × tier rows (public, private,
   isolated); NAT Gateways sit inside their subnet; Internet Gateways and route tables are small blocks. Arrows: a subnet → a route
   table (the subnet uses it), a route table → a gateway (a route, with its destination). Drag a block into another box to move it there.
+  **Arrange** (⇧⌘A) lays everything out from the innermost block outwards: every block gets the room its text needs, a subnet grows
+  around its instances, a VPC around its subnets, gateways, route tables and groups (long lists wrap into rows), so nothing overlaps.
+- **Tidy up:** with nothing selected, the inspector lists what would clean the design and does it at a click (one undo step each):
+  delete the security groups nothing uses and the address ranges no rule uses; merge groups with exactly the same rules (nothing opens);
+  fold a group into one whose rules contain its own, saying what its instances would newly let in; combine the `launch-wizard-N`
+  groups the console makes one per launch into one group with the union of their rules, listing per group what that opens. Made for
+  an imported account that grew by clicking "Launch instance".
 - **Checks on every block:** VPC and subnet CIDRs between /16 and /28, inside the VPC, not overlapping; usable addresses shown as
   `2^(32−24) = 256 − 5 = 251`; a public subnet must route `0.0.0.0/0` to the Internet Gateway, a private one to a NAT Gateway, an
   isolated one nowhere; a NAT Gateway must be in a public subnet; a private subnet whose NAT is in another AZ gets a warning; one
