@@ -38,7 +38,7 @@ function BoxNode({ data, selected }: NodeProps<Node<Data>>) {
         <span>{isVpc ? "VPC" : String(n.params.tier ?? "subnet")}{mark(st)}</span><span className="bl">{n.label}</span>{n.params.aws_id ? <span className="awsid" title="created in AWS">{String(n.params.aws_id)}</span> : null}
         <span className="bs" title={r?.summary}>{isVpc ? String(n.params.cidr ?? "") : `${n.params.cidr || "no CIDR"} · ${data.azName}`}</span>
       </div>
-      {!isVpc && r && <div className={`bm st-${st}`}>{r.status !== "ok" ? r.messages[0] : r.info[0]?.replace(/^.*= /, "") + (r.info[0] ? " usable" : "")}</div>}
+      {!isVpc && r && <div className={`bm st-${st}`}>{r.status !== "ok" ? r.messages[0] : r.info[0]?.replace(/^.*= /, "")}</div>}
       {isVpc && r && r.status !== "ok" && <div className={`bm st-${st}`}>{r.messages[0]}</div>}
       {!isVpc && <Handle type="source" position={Position.Right} style={{ top: 18 }} title="drag to a route table" />}
     </div>

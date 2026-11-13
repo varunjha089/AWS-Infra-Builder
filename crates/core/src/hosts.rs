@@ -105,6 +105,50 @@ pub fn check(h: &Host) -> String {
     String::new()
 }
 
+// ---------------------------------------------------------------- key files in ~/.ssh (names only: no key is ever read)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KeyFile {
+    pub path: String,
+    pub name: String,
+    /// "pem" (a console download), "openssh" (an id_* file with its .pub), "" (looks like a key by its name)
+    pub kind: String,
+}
+
+/// the user's ~/.ssh folder
+pub fn ssh_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".ssh")
+}
+
+/// the private key files of a folder, told apart by name alone: *.pem, *.key, files with a `.pub` sibling, id_*
+pub fn list_keys(dir: &std::path::Path) -> Vec<KeyFile> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let mut names: Vec<String> = rd.filter_map(|e| e.ok()).filter(|e| e.path().is_file()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    let has_pub = |n: &str| names.iter().any(|o| o == &format!("{n}.pub"));
+    names.iter().filter_map(|n| {
+        if n.ends_with(".pub") || n.starts_with('.') || matches!(n.as_str(), "config" | "known_hosts" | "known_hosts.old" | "authorized_keys" | "environment" | "rc") {
+            return None;
+        }
+        let kind = if n.ends_with(".pem") || n.ends_with(".key") { "pem" } else if has_pub(n) { "openssh" } else if n.starts_with("id_") { "" } else { return None };
+        Some(KeyFile { path: dir.join(n).to_string_lossy().into_owned(), name: n.clone(), kind: kind.into() })
+    }).collect()
+}
+
+/// a name AWS accepts for a key pair (and a file name that stays simple)
+pub fn key_pair_name_problem(name: &str) -> String {
+    let n = name.trim();
+    if n.is_empty() {
+        return "Give the key pair a name (letters, digits, - and _).".into();
+    }
+    if n.len() > 255 || !n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+        return "A key pair name has only letters, digits, - _ and . (no spaces or slashes).".into();
+    }
+    if n.starts_with('.') {
+        return "The name must not start with a dot.".into();
+    }
+    String::new()
+}
+
 // ---------------------------------------------------------------- saved hosts (settings.json)
 pub fn saved() -> Vec<Host> {
     serde_json::from_value(store::settings()["hosts"].clone()).unwrap_or_default()
@@ -149,5 +193,21 @@ mod tests {
         assert_eq!(old.note, "");
         assert_eq!(guess_user("debian"), "admin");
         assert_eq!(default_key_path("  "), "");
+    }
+
+    #[test]
+    fn key_files_are_told_apart_by_name_without_reading_them() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["lab.pem", "id_ed25519", "id_ed25519.pub", "work", "work.pub", "known_hosts", "config", "notes.txt", "id_old"] {
+            std::fs::write(dir.path().join(n), "x").unwrap();
+        }
+        let keys = list_keys(dir.path());
+        let names: Vec<(&str, &str)> = keys.iter().map(|k| (k.name.as_str(), k.kind.as_str())).collect();
+        assert_eq!(names, vec![("id_ed25519", "openssh"), ("id_old", ""), ("lab.pem", "pem"), ("work", "openssh")]);
+        assert!(keys[2].path.ends_with("lab.pem"));
+        assert!(list_keys(&dir.path().join("missing")).is_empty());
+        assert_eq!(key_pair_name_problem("nn-builder_2026"), "");
+        assert!(!key_pair_name_problem("my key").is_empty());
+        assert!(!key_pair_name_problem("").is_empty());
     }
 }

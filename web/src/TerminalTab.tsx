@@ -7,7 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { api, errText, type Design, type Host, type HostsState } from "./api";
+import { api, errText, type Design, type Host, type HostsState, type KeyFile, type KeyPair } from "./api";
 import { useTheme } from "./theme";
 
 interface Session { id: string; host: Host; term: Terminal; fit: FitAddon; el: HTMLDivElement; open: boolean }
@@ -30,6 +30,20 @@ export function TerminalTab({ visible, design, toast }: { visible: boolean; desi
   const [sessions, setSessions] = useState<Session[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
+  const [keys, setKeys] = useState<{ dir: string; keys: KeyFile[] }>({ dir: "", keys: [] });
+  const [pairs, setPairs] = useState<{ region: string; pairs: KeyPair[] } | null>(null);
+  const [newName, setNewName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const reloadKeys = useCallback(() => api.keysList().then(setKeys).catch(() => {}), []);
+  useEffect(() => { reloadKeys(); }, [reloadKeys]);
+  const inSsh = (p: string) => !!keys.dir && (p.trim().startsWith(keys.dir + "/") || p.trim().startsWith("~/.ssh/"));
+  const moveKey = () => api.keyMove(form.key).then((p) => { field("key", p); reloadKeys(); toast(`Moved to ${p} (mode 600).`); }).catch((e) => toast(errText(e)));
+  const createPair = () => {
+    setBusy(true);
+    api.awsCreateKeyPair(newName, design?.region).then((r) => { field("key", r.path); setNewName(""); reloadKeys(); toast(`Key pair ${r.name} made in ${r.region}; its key is at ${r.path}. AWS gives it only once: keep that file.`); })
+      .catch((e) => toast(errText(e))).finally(() => setBusy(false));
+  };
+  const listPairs = () => { setBusy(true); api.awsKeyPairs(design?.region).then(setPairs).catch((e) => toast(errText(e))).finally(() => setBusy(false)); };
   const holder = useRef<HTMLDivElement>(null);
   const sessRef = useRef<Session[]>([]);
   sessRef.current = sessions;
@@ -169,16 +183,27 @@ export function TerminalTab({ visible, design, toast }: { visible: boolean; desi
         </div>
         <label>Key file (.pem; empty = ssh's agent and ~/.ssh/config)
           <div className="row" style={{ margin: 0 }}>
-            <input style={{ flex: 1 }} value={form.key} onChange={(e) => field("key", e.target.value)} placeholder="~/.ssh/my_key.pem" />
+            <input style={{ flex: 1 }} list="aib-keys" value={form.key} onChange={(e) => field("key", e.target.value)} placeholder="~/.ssh/my_key.pem" />
+            <datalist id="aib-keys">{keys.keys.map((k) => <option key={k.path} value={k.path}>{k.name}</option>)}</datalist>
             <button className="small" onClick={() => api.pickFile().then((p) => p && field("key", p)).catch((e) => toast(errText(e)))}>Choose…</button>
           </div>
         </label>
+        {form.key.trim() && !inSsh(form.key) && <div className="msg info small">This key is outside ~/.ssh. <button className="small" onClick={moveKey}>Move it into ~/.ssh (mode 600)</button></div>}
         {keyProblem && <div className="msg warn small">{keyProblem}{keyProblem.includes("mode 600") && <> <button className="small" onClick={() => api.keyFix(form.key).then(setKeyProblem).catch((e) => toast(errText(e)))}>Fix permissions</button></>}</div>}
         <div className="row">
           <button className="primary" disabled={!form.host.trim()} onClick={() => connect(form)}>Connect</button>
           <button onClick={save}>Save</button>
           <button className="small" onClick={() => setForm(blank())}>Clear</button>
         </div>
+        <h4>Keys</h4>
+        <p className="small muted">In {keys.dir || "~/.ssh"}: {keys.keys.length === 0 ? "no key files yet." : "click one to use it."}</p>
+        <div className="keylist">{keys.keys.map((k) => <button key={k.path} className={`small ${form.key.trim() === k.path ? "primary" : ""}`} onClick={() => field("key", k.path)} title={k.path}>{k.name}{k.kind === "openssh" ? " (ssh)" : ""}</button>)}</div>
+        <div className="row" style={{ alignItems: "flex-end" }}>
+          <label style={{ flex: 1, margin: 0 }}>New key pair in AWS (free; the key lands in ~/.ssh)<input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="nn-builder-2026" /></label>
+          <button className="small primary" disabled={busy || !newName.trim()} onClick={createPair}>Create &amp; download</button>
+        </div>
+        <div className="row"><button className="small" disabled={busy} onClick={listPairs}>List the key pairs in AWS</button>{pairs && <span className="small muted">{pairs.region}: {pairs.pairs.length} pairs</span>}</div>
+        {pairs && pairs.pairs.length > 0 && <table className="grid small"><tbody>{pairs.pairs.map((p) => <tr key={p.name}><td>{p.name}</td><td className="muted">{p.kind}</td><td>{p.file ? <button className="small" onClick={() => field("key", p.file!)}>use file</button> : <span className="muted">no file here: AWS gives a key only when the pair is made</span>}</td></tr>)}</tbody></table>}
         <p className="small muted">Amazon Linux logs in as <code>ec2-user</code>, Ubuntu as <code>ubuntu</code>, Debian as <code>admin</code>. The instance's group must let port 22 in from your address (the Fix on the canvas does that).</p>
       </aside>
       <section className="term-main">

@@ -31,6 +31,8 @@ export interface TofuStatus { tofu: string | null; version: string | null; insta
 export interface Loaded { design: Design; analysis: Analysis }
 export interface Host { id: string; label: string; host: string; user: string; port: number; key: string; block: string | null; aws_id: string | null; note: string }
 export interface HostsState { saved: Host[]; suggested: Host[]; ssh: string | null }
+export interface KeyFile { path: string; name: string; kind: string }
+export interface KeyPair { name: string; kind: string; fingerprint: string; file: string | null }
 export interface TextError { line: number; message: string }
 
 export interface ProjectInfo { name: string; path: string; draft: boolean }
@@ -82,6 +84,10 @@ export const api = {
   termResize: (id: string, cols: number, rows: number) => invoke<void>("term_resize", { id, cols, rows }),
   termClose: (id: string) => invoke<void>("term_close", { id }),
   termList: () => invoke<string[]>("term_list"),
+  keysList: () => invoke<{ dir: string; keys: KeyFile[] }>("keys_list"),
+  keyMove: (path: string) => invoke<string>("key_move", { path }),
+  awsKeyPairs: (region?: string) => invoke<{ region: string; pairs: KeyPair[] }>("aws_key_pairs", { region: region ?? null }),
+  awsCreateKeyPair: (name: string, region?: string) => invoke<{ name: string; path: string; region: string }>("aws_create_key_pair", { name, region: region ?? null }),
   exportCode: () => invoke<string>("export_code"),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
   awsState: () => invoke<AwsState>("aws_state"),

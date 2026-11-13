@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.6.0 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.6.1 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
 Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
@@ -14,7 +14,11 @@ whose rules contain its own, combine the launch-wizard groups, delete unused gro
 from my address" looks the owner's address up at checkip.amazonaws.com. 0.6.0: the Terminal tab (`hosts.rs`, `term.rs`,
 `TerminalTab.tsx`): SSH into the design's instances from the app, like Termius: the system `ssh` in a pseudo-terminal drawn
 with xterm.js, one host per instance (user from the OS, ~/.ssh/<key pair>.pem, the address from the import or the apply outputs),
-saved hosts in settings.json, "Connect (SSH)" on an instance block. The app never reads a key; ssh does.
+saved hosts in settings.json, "Connect (SSH)" on an instance block. The app never reads a key; ssh does. 0.6.1: keys: the
+key files of ~/.ssh offered (by name only), "Move it into ~/.ssh (mode 600)" for a key chosen elsewhere, a new key pair made in
+AWS (ec2:CreateKeyPair, free: the one write outside Apply) with its key written once to ~/.ssh/<name>.pem, the account's key
+pairs listed with whether the file is here; a Fix moves a NAT Gateway out of a private subnet (the "Spot the mistakes"
+template is now fully repaired by "Fix all safe ones").
 Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
@@ -22,7 +26,7 @@ another account (account guard) or the estimate exceeds the project's budget wit
 traffic arrows, EC2 instances and address ranges; checks CIDRs, routing, exposure and placement while drawing; keeps the design in step
 with `.aib` text; generates OpenTofu/Terraform HCL (validated with `tofu validate` for every template, locally and in CI); shows what
 the design costs a month and how to pay less; takes AWS credentials from `~/.aws` profiles or pasted keys (keychain); imports an existing
-VPC with its groups, rules and instances read-only. Night mode is neon. The app itself only reads AWS; OpenTofu changes it only on the
+VPC with its groups, rules and instances read-only. Night mode is neon. The app itself only reads AWS (plus the free CreateKeyPair from the Terminal tab); OpenTofu changes it only on the
 owner's Apply. **Never run apply or destroy in tests or on your own: it creates resources that cost money.** The opt-in real tests
 only read (identity, import, plan). Still to come (`IDEA.md` §13): ALB/ASG/RDS/S3/endpoints, reachability, drift, remote state.
 
@@ -60,11 +64,14 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            unused range, unused group; "default" only from the design), egress_rules, my_ip (a risky port open to
                            0.0.0.0/0 -> the arrow's source becomes an Address range "my_ip" <ip>/32), type (nearest_type: same size in
                            a family of the same letter, else t3.micro; GPU families -> g4dn.xlarge), graviton, public_ip_off/on,
-                           asg_sizes, lifecycle. apply(design, fix, my_ip); apply_all_safe() re-lists after each. Analysis.fixes
+                           asg_sizes, lifecycle, nat_move (a NAT in a private subnet -> the VPC's public subnet, same AZ first; else
+                           the subnet's tier fix). apply(design, fix, my_ip); apply_all_safe() re-lists after each. Analysis.fixes
   hosts.rs                 Host {id, label, host, user, port, key (path, "~" allowed), block, aws_id, note}; guess_user(os) (al2023 ec2-user,
                            ubuntu ubuntu, debian admin), default_key_path(key pair) = ~/.ssh/<name>.pem, suggest(design) = one Host per
                            ec2 block (address from params.address, else a note why it cannot be reached yet), ssh_args(host, key path),
-                           check(host) (plain-words problems before ssh starts), saved()/save() = settings.json "hosts". No key is read
+                           check(host) (plain-words problems before ssh starts), saved()/save() = settings.json "hosts". No key is read.
+                           ssh_dir(), list_keys(dir) = KeyFile {path, name, kind pem|openssh|""} told apart by name (*.pem, *.key, a
+                           file with its .pub, id_*), key_pair_name_problem(name)
   cidr.rs                  Cidr: parse, contains, overlaps, usable (size − 5), is_private, next_free (aligned); random-input test
   checks.rs                analyse(&Design) -> Analysis {nodes: NodeResult{status, messages, info, summary}, edges, problems, ok, counts, az_spread,
                            az_names, cost}. Every rule has a message that says what to change. Non-network CIDRs are errors (AWS and the provider
@@ -111,8 +118,9 @@ crates/core/src/           aib-core: no UI, no AWS calls
 app/src-tauri/src/term.rs  terminal sessions: portable-pty runs the system `ssh` (found on PATH, /usr/bin, /opt/homebrew/bin) in a
                            pseudo-terminal; a reader thread emits `term-data` {id, data (base64)} and `term-exit` {id, code} events;
                            Terms {open, write, resize, close, open_ids}. expand_home("~/…"), key_problem(path) (missing, a folder, or
-                           readable by others: ssh refuses those), fix_key_permissions (mode 600). Tests: the key problems, and `sh -c echo`
-                           through a pty (no Tauri handle needed)
+                           readable by others: ssh refuses those), fix_key_permissions (mode 600), ensure_dir (700), move_key_into(path,
+                           dir) (rename, else copy + remove; never overwrites; 600), write_new_key(dir, name, material) (create_new,
+                           0600). Tests: the key problems, the moves, and `sh -c echo` through a pty (no Tauri handle needed)
 app/src-tauri/src/tofu.rs  OpenTofu: locate() (settings tofu_path, <home>/bin/tofu, PATH, /opt/homebrew/bin; terraform too), install()
                            (official release zip for the OS/arch, SHA-256 checked against the published sums, unzipped into <home>/bin),
                            Jobs (one background job: JobSnap {state, kind, log, plan, outputs, marks block->creating/created/failed/
@@ -121,7 +129,8 @@ app/src-tauri/src/tofu.rs  OpenTofu: locate() (settings tofu_path, <home>/bin/to
                            backs up terraform.tfstate to tofu/backups/<timestamp>, apply -json streamed, outputs), state_info().
                            Credentials only in the child's environment (AWS_PROFILE, or the three key variables). One `#[ignore]` real
                            test plans the web_server template read-only (12 to add) with the default profile.
-app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sdk-ec2): Creds {Profile | Keys}, identity(), list_vpcs(),
+app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sdk-ec2): Creds {Profile | Keys}, identity(), list_vpcs(), key_pairs(),
+                           create_key_pair() (the one write outside Apply: a key pair is free),
                            inventory() (VPC, subnets, IGWs, NATs, route tables, security groups, instances, AMI names) with a 60 s timeout
                            and readable errors. Only Describe* and GetCallerIdentity. One real test (`#[ignore]`, AWS_INFRA_BUILDER_REAL=1 with
                            the default profile) prints the account's first VPC as .aib.
@@ -132,7 +141,9 @@ app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load,
                            project_set_budget, design_set_aws_ids (the created ids onto the blocks, and from the outputs the instances'
                            public/private addresses); hosts_state(design) {saved, suggested, ssh path}, hosts_save, key_check, key_fix,
                            pick_file, term_open(id, host, cols, rows) (hosts::check + key_problem first; returns the ssh arguments),
-                           term_write, term_resize, term_close, term_list; aws_state, aws_set_keys, aws_clear_keys,
+                           term_write, term_resize, term_close, term_list, keys_list, key_move, aws_key_pairs (DescribeKeyPairs +
+                           whether ~/.ssh/<name>.pem exists), aws_create_key_pair(name) (CreateKeyPair ed25519 pem -> write_new_key);
+                           aws_state, aws_set_keys, aws_clear_keys,
                            aws_select, aws_test, aws_list_vpcs, aws_import) and the menu (File/Edit/View/Design -> "menu" and "open-tab"
                            events). Every design command returns {design (synced), analysis}. Pasted keys live in the keychain (service
                            "AWS Infra Builder", items aws_key_id / aws_key_secret / aws_key_token), cached per launch; settings.json
@@ -155,7 +166,8 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
   TextTab.tsx              the .aib text with a line gutter; Apply (⌘↩) -> design_from_text; errors by line
   CostsTab.tsx             the monthly estimate per block, the advice, the assumptions
   TerminalTab.tsx          the Termius part: hosts from the design (hosts_state.suggested) and saved hosts, a host form (label, address,
-                           user, port, key file with Choose… and the key check / Fix permissions), sessions as tabs, each an xterm.js
+                           user, port, key file with Choose…, the ~/.ssh keys as a datalist and buttons, "Move it into ~/.ssh", the key
+                           check / Fix permissions, "New key pair in AWS" and "List the key pairs in AWS"), sessions as tabs, each an xterm.js
                            Terminal + FitAddon in its own div (term-data bytes in, onData -> term_write, onResize -> term_resize). Always
                            mounted (display none when another tab shows) so sessions survive a tab switch; the "aib-connect" event
                            (Connect (SSH) on an instance block) opens the block's host, the saved copy first. Night theme = neon palette
@@ -189,7 +201,9 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
   and `backups/`.
 - The Terminal tab: the app spawns the user's own `ssh` and never reads, copies or stores a private key (the path only, in
   settings.json); host keys are checked by ssh as usual (the first-connection question is answered in the terminal). No test
-  connects anywhere; the pty test runs `sh -c echo`.
+  connects anywhere; the pty test runs `sh -c echo`. Keys are listed by file name, never opened. A new key pair's material is
+  written once to ~/.ssh/<name>.pem (mode 600, never overwriting) and kept nowhere else. ec2:CreateKeyPair is the one call
+  outside Apply that changes the account; it costs nothing and the policy in the Connection tab names it.
 - Night mode stays neon: a new screen or element gets its `[data-theme="night"]` rules (glow in --c or the cyan/magenta accents); day mode
   keeps its plain look.
 - Cost minimisation is a design rule: every block that costs money while idle shows its monthly price on the block, in the Costs tab and in

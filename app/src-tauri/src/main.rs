@@ -675,6 +675,51 @@ fn term_list(st: State<'_, App>) -> Vec<String> {
     st.terms.open_ids()
 }
 
+/// the key files in ~/.ssh, by name only
+#[tauri::command]
+fn keys_list() -> Value {
+    let dir = hosts::ssh_dir();
+    json!({"dir": dir.to_string_lossy(), "keys": hosts::list_keys(&dir)})
+}
+
+/// move a key file into ~/.ssh with mode 600; returns its new path
+#[tauri::command]
+fn key_move(path: String) -> R<String> {
+    term::move_key_into(&path, &hosts::ssh_dir())
+}
+
+/// the account's key pairs in the region, each with whether ~/.ssh/<name>.pem is here (read-only)
+#[tauri::command]
+async fn aws_key_pairs(region: Option<String>) -> R<Value> {
+    let creds = creds_for_call()?;
+    let region = region_for_call(region);
+    let pairs = aws::key_pairs(creds, &region).await?;
+    let dir = hosts::ssh_dir();
+    Ok(json!({"region": region, "pairs": pairs.iter().map(|k| {
+        let file = dir.join(format!("{}.pem", k.name));
+        json!({"name": k.name, "kind": k.kind, "fingerprint": k.fingerprint, "file": file.is_file().then(|| file.to_string_lossy().into_owned())})
+    }).collect::<Vec<_>>()}))
+}
+
+/// a new key pair in AWS (free), its private key written once to ~/.ssh/<name>.pem with mode 600
+#[tauri::command]
+async fn aws_create_key_pair(name: String, region: Option<String>) -> R<Value> {
+    let name = name.trim().to_string();
+    let problem = hosts::key_pair_name_problem(&name);
+    if !problem.is_empty() {
+        return Err(problem);
+    }
+    let dir = hosts::ssh_dir();
+    if dir.join(format!("{name}.pem")).exists() {
+        return Err(format!("{}/{name}.pem already exists. Use it, or choose another name.", dir.display()));
+    }
+    let creds = creds_for_call()?;
+    let region = region_for_call(region);
+    let material = aws::create_key_pair(creds, &region, &name).await?;
+    let path = term::write_new_key(&dir, &name, &material)?;
+    Ok(json!({"name": name, "path": path, "region": region}))
+}
+
 // ---------------------------------------------------------------- menu
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let item = |id: &str, text: &str, accel: Option<&str>| MenuItem::with_id(app, id, text, true, accel);
@@ -768,7 +813,8 @@ fn main() {
             project_load, save_design, design_from_text, design_arrange, design_tidy, design_fix, design_add, design_connect, design_remove, text_help, code, export_code, open_url,
             aws_state, aws_set_keys, aws_clear_keys, aws_select, aws_test, aws_list_vpcs, aws_import,
             tofu_status, tofu_install, tofu_plan, tofu_apply, job_status, project_set_budget, design_set_aws_ids,
-            hosts_state, hosts_save, key_check, key_fix, pick_file, term_open, term_write, term_resize, term_close, term_list
+            hosts_state, hosts_save, key_check, key_fix, pick_file, term_open, term_write, term_resize, term_close, term_list,
+            keys_list, key_move, aws_key_pairs, aws_create_key_pair
         ])
         .build(tauri::generate_context!())
         .expect("error while running AWS Infra Builder")

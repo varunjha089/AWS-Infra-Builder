@@ -114,6 +114,15 @@ pub fn fixes(d: &Design) -> Vec<Fix> {
         }
     }
 
+    // a NAT Gateway in a private subnet: move it to a public one of the VPC (same AZ first), else make its subnet public
+    for n in d.nodes.iter().filter(|n| n.kind == "nat") {
+        let Some(s) = n.parent.as_ref().and_then(|pid| d.node(pid)).filter(|s| s.kind == "subnet" && p(s, "tier") != "public") else { continue };
+        match nat_home(d, n).and_then(|id| d.node(&id)) {
+            Some(home) => out.push(fix("nat_move", n, format!("Move it to {} (public, AZ {})", home.label, p(home, "az")), "", true)),
+            None => out.push(fix("tier", s, "Mark the subnet public".into(), "it then needs a route to the Internet Gateway too (a Fix appears for that)", true)),
+        }
+    }
+
     for c in d.nodes.iter().filter(|n| n.kind == "cidr") {
         if !d.edges.iter().any(|e| e.source == c.id || e.target == c.id) {
             out.push(fix("delete", c, "Delete this range".into(), "", true));
@@ -202,6 +211,14 @@ fn propose(d: &Design, s: &Node) -> Option<Cidr> {
 }
 
 /// make the change; `my_ip` is the owner's public IPv4 address for the fixes that need it
+/// the public subnet of the NAT's VPC it should move to: the same AZ when there is one
+fn nat_home(d: &Design, nat: &Node) -> Option<String> {
+    let s = nat.parent.as_ref().and_then(|pid| d.node(pid))?;
+    let vpc = s.parent.as_ref()?;
+    let public: Vec<&Node> = d.children(vpc).into_iter().filter(|o| o.kind == "subnet" && p(o, "tier") == "public").collect();
+    public.iter().find(|o| p(o, "az") == p(s, "az")).or(public.first()).map(|o| o.id.clone())
+}
+
 pub fn apply(d: &mut Design, f: &Fix, my_ip: Option<&str>) -> Result<(), String> {
     let set = |d: &mut Design, k: &str, v: serde_json::Value| { if let Some(n) = d.node_mut(&f.target) { n.params.insert(k.into(), v); } };
     match f.kind.as_str() {
@@ -218,6 +235,11 @@ pub fn apply(d: &mut Design, f: &Fix, my_ip: Option<&str>) -> Result<(), String>
         "tier" => {
             let tier = f.title.rsplit(' ').next().unwrap_or("private").to_string();
             set(d, "tier", json!(tier));
+        }
+        "nat_move" => {
+            let nat = d.node(&f.target).cloned().ok_or("block gone")?;
+            let home = nat_home(d, &nat).ok_or("no public subnet in the VPC: mark one public first")?;
+            if let Some(n) = d.node_mut(&f.target) { n.parent = Some(home); n.x = 0.0; n.y = 0.0; }
         }
         "route_to_igw" => {
             let s = d.node(&f.target).cloned().ok_or("block gone")?;
@@ -359,5 +381,26 @@ rule internet -> web tcp 22\nrule internet -> web tcp 443\nrule web -> db tcp 54
         assert!(fixes(&d).iter().all(|f| f.kind != "my_ip"));
         let text = crate::dsl::print(&d);
         assert!(text.contains("rule my_ip -> web tcp 22"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+    use crate::{checks, templates};
+
+    #[test]
+    fn the_spot_the_mistakes_template_is_repaired_by_the_safe_fixes() {
+        let mut d = templates::build("broken").unwrap();
+        let before = checks::analyse(&d);
+        assert!(!before.ok, "the template should start with errors");
+        let n = apply_all_safe(&mut d);
+        assert!(n > 0);
+        let after = checks::analyse(&d);
+        assert!(after.ok, "left: {:?}", after.problems);
+        // the NAT now sits in a public subnet
+        let nat = d.nodes.iter().find(|n| n.kind == "nat").unwrap();
+        let sub = d.node(nat.parent.as_ref().unwrap()).unwrap();
+        assert_eq!(sub.params["tier"], "public");
     }
 }

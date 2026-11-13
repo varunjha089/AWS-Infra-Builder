@@ -155,9 +155,91 @@ pub fn fix_key_permissions(path: &str) -> Result<(), String> {
     }
 }
 
+/// the key folder, made with mode 700 when missing
+pub fn ensure_dir(dir: &std::path::Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Could not make {}: {e}", dir.display()))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+/// move a key file into the key folder (copy + remove when a plain rename fails, e.g. from another volume), mode 600;
+/// never overwrites. Returns the new path
+pub fn move_key_into(path: &str, dir: &std::path::Path) -> Result<String, String> {
+    let from = std::path::PathBuf::from(expand_home(path));
+    if !from.is_file() {
+        return Err(format!("{} is not a file.", from.display()));
+    }
+    ensure_dir(dir)?;
+    let name = from.file_name().ok_or("The key file has no name.")?.to_os_string();
+    let to = dir.join(&name);
+    if to == from {
+        fix_key_permissions(&to.to_string_lossy())?;
+        return Ok(to.to_string_lossy().into_owned());
+    }
+    if to.exists() {
+        return Err(format!("{} already exists; rename one of them first.", to.display()));
+    }
+    if std::fs::rename(&from, &to).is_err() {
+        std::fs::copy(&from, &to).map_err(|e| format!("Could not copy to {}: {e}", to.display()))?;
+        std::fs::remove_file(&from).map_err(|e| format!("Copied to {}, but the original could not be removed: {e}", to.display()))?;
+    }
+    fix_key_permissions(&to.to_string_lossy())?;
+    Ok(to.to_string_lossy().into_owned())
+}
+
+/// write a freshly created private key as <dir>/<name>.pem with mode 600 (created new, never overwritten)
+pub fn write_new_key(dir: &std::path::Path, name: &str, material: &str) -> Result<String, String> {
+    ensure_dir(dir)?;
+    let to = dir.join(format!("{name}.pem"));
+    if to.exists() {
+        return Err(format!("{} already exists: the new key was NOT written. Move the old file away and create the pair again under another name.", to.display()));
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&to).map_err(|e| format!("Could not create {}: {e}", to.display()))?;
+    f.write_all(material.as_bytes()).and_then(|_| if material.ends_with('\n') { Ok(()) } else { f.write_all(b"\n") }).map_err(|e| format!("Could not write {}: {e}", to.display()))?;
+    Ok(to.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_move_into_the_folder_with_mode_600_and_new_keys_are_never_overwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let ssh = root.path().join("home/.ssh");
+        let dl = root.path().join("Downloads/lab.pem");
+        std::fs::create_dir_all(dl.parent().unwrap()).unwrap();
+        std::fs::write(&dl, "key").unwrap();
+        let moved = move_key_into(&dl.to_string_lossy(), &ssh).unwrap();
+        assert!(moved.ends_with("/.ssh/lab.pem") && !dl.exists());
+        assert_eq!(key_problem(&moved), None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&ssh).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        std::fs::write(&dl, "key2").unwrap();
+        assert!(move_key_into(&dl.to_string_lossy(), &ssh).unwrap_err().contains("already exists"));
+        let p = write_new_key(&ssh, "nn", "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----").unwrap();
+        assert!(p.ends_with("nn.pem"));
+        assert_eq!(key_problem(&p), None);
+        assert!(std::fs::read_to_string(&p).unwrap().ends_with("-----\n"));
+        assert!(write_new_key(&ssh, "nn", "other").unwrap_err().contains("NOT written"));
+        assert_eq!(std::fs::read_to_string(&p).unwrap().contains("abc"), true);
+    }
 
     #[test]
     fn key_problems_are_named_and_fixed() {

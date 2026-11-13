@@ -33,6 +33,9 @@ Apply after seeing the plan, and the Costs tab tells you beforehand what they co
   user its OS expects, the key pair's `.pem` file and its address (from the import, or from the outputs after Apply); press
   "Connect (SSH)" on an instance block, or save any other machine in the list. It runs your own `ssh` in a real terminal
   (xterm.js), so host keys, agents and `~/.ssh/config` work as they always do; the app never reads a key.
+- **Keys:** the key files in `~/.ssh` are offered by name; a key chosen anywhere else can be moved into `~/.ssh` with mode 600
+  in one click (ssh refuses a key others can read); "New key pair in AWS" makes an ed25519 pair (free) and writes its key once
+  to `~/.ssh/<name>.pem`; "List the key pairs in AWS" shows which pairs have their file on this computer.
 - **Checks on every block:** VPC and subnet CIDRs between /16 and /28, inside the VPC, not overlapping; usable addresses shown as
   `2^(32−24) = 256 − 5 = 251`; a public subnet must route `0.0.0.0/0` to the Internet Gateway, a private one to a NAT Gateway, an
   isolated one nowhere; a NAT Gateway must be in a public subnet; a private subnet whose NAT is in another AZ gets a warning; one

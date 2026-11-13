@@ -128,6 +128,11 @@ pub fn read_only_policy() -> String {
             "Effect": "Allow",
             "Action": ["ec2:Describe*", "sts:GetCallerIdentity", "pricing:GetProducts"],
             "Resource": "*"
+        }, {
+            "Sid": "AwsInfraBuilderKeyPairs",
+            "Effect": "Allow",
+            "Action": ["ec2:CreateKeyPair"],
+            "Resource": "*"
         }]
     })).unwrap_or_default()
 }

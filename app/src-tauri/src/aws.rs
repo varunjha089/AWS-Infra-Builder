@@ -186,3 +186,37 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------- key pairs (the Terminal tab)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KeyPairInfo {
+    pub name: String,
+    pub kind: String,
+    pub fingerprint: String,
+}
+
+/// the account's key pairs in the region (ec2:DescribeKeyPairs, read-only)
+pub async fn key_pairs(creds: Creds, region: &str) -> Result<Vec<KeyPairInfo>, String> {
+    with_timeout(async {
+        let conf = config(creds, region).await;
+        let out = aws_sdk_ec2::Client::new(&conf).describe_key_pairs().send().await.map_err(readable)?;
+        let mut v: Vec<KeyPairInfo> = out.key_pairs().iter().map(|k| KeyPairInfo {
+            name: k.key_name().unwrap_or("").into(),
+            kind: k.key_type().map(|t| t.as_str().to_string()).unwrap_or_default(),
+            fingerprint: k.key_fingerprint().unwrap_or("").into(),
+        }).collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(v)
+    }).await
+}
+
+/// a new ed25519 key pair (ec2:CreateKeyPair: free; the one write the app makes outside Apply). AWS gives the private key
+/// once, here; the caller writes it to ~/.ssh and nothing else keeps it
+pub async fn create_key_pair(creds: Creds, region: &str, name: &str) -> Result<String, String> {
+    use aws_sdk_ec2::types::{KeyFormat, KeyType};
+    with_timeout(async {
+        let conf = config(creds, region).await;
+        let out = aws_sdk_ec2::Client::new(&conf).create_key_pair().key_name(name).key_type(KeyType::Ed25519).key_format(KeyFormat::Pem).send().await.map_err(readable)?;
+        out.key_material().map(String::from).filter(|m| !m.is_empty()).ok_or_else(|| "AWS returned no key material.".to_string())
+    }).await
+}

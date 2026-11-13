@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aib-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "aws-infra-builder-app"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "aib-core",
  "anyhow",
