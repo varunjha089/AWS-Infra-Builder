@@ -136,6 +136,8 @@ pub async fn inventory(creds: Creds, region: &str, vpc_id: &str, account: &str) 
             subnet_id: i.subnet_id().unwrap_or("").into(), sgs: i.security_groups().iter().filter_map(|g| g.group_id()).map(String::from).collect(),
             public_ip: i.public_ip_address().is_some(), key: i.key_name().map(String::from), state: i.state().and_then(|s| s.name()).map(|n| n.as_str().to_string()).unwrap_or_default(),
             image_name: i.image_id().map(String::from),
+            spot: i.instance_lifecycle().map(|l| l.as_str() == "spot").unwrap_or(false),
+            disk: None,
         }).collect();
         // the AMI names, to guess each instance's OS (one call for all)
         let image_ids: Vec<String> = instances.iter().filter_map(|i| i.image_name.clone()).collect();

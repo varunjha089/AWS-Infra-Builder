@@ -177,7 +177,8 @@ pub fn defaults(kind: &str) -> Params {
         // egress "all": AWS's default (everything out); "rules": only what the arrows leaving the group say
         "sg" => json!({"egress": "all", "description": ""}),
         // the cheapest type that runs a small service; no public address unless asked (an IPv4 address costs money)
-        "ec2" => json!({"type": "t4g.micro", "os": "al2023", "key": "", "public_ip": false, "sgs": []}),
+        // spot: about 70 % cheaper, may be interrupted (for work that can be stopped and resumed); disk: the root volume in GiB
+        "ec2" => json!({"type": "t4g.micro", "os": "al2023", "key": "", "public_ip": false, "sgs": [], "spot": false, "disk": 8}),
         "cidr" => json!({"cidr": "0.0.0.0/0"}),
         _ => json!({}),
     };

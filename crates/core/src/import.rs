@@ -84,6 +84,11 @@ pub struct InstanceInfo {
     pub state: String,
     /// the AMI's name, to guess the OS
     pub image_name: Option<String>,
+    #[serde(default)]
+    pub spot: bool,
+    /// the root volume in GiB, when known
+    #[serde(default)]
+    pub disk: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -287,7 +292,7 @@ pub fn to_design(inv: &Inventory) -> Imported {
         let sgs: Vec<String> = i.sgs.iter().filter_map(|g| sg_node.get(g).cloned()).collect();
         let nid = id();
         d.nodes.push(Node { id: nid, kind: "ec2".into(), label: unique(label_for(&i.name, &i.id, "instance")),
-            params: obj(json!({"type": i.instance_type, "os": os, "key": i.key.clone().unwrap_or_default(), "public_ip": i.public_ip, "sgs": sgs, "aws_id": i.id, "state": i.state})),
+            params: obj(json!({"type": i.instance_type, "os": os, "key": i.key.clone().unwrap_or_default(), "public_ip": i.public_ip, "sgs": sgs, "aws_id": i.id, "state": i.state, "spot": i.spot, "disk": i.disk.unwrap_or(8)})),
             parent: Some(parent.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
         if i.state == "stopped" {
             notes.push(format!("Instance {} is stopped: it costs only its volume and public address until started.", i.name.clone().unwrap_or(i.id.clone())));
@@ -338,9 +343,9 @@ mod tests {
                     egress: vec![PermInfo { proto: "-1".into(), from: 0, to: 0, cidrs: vec!["0.0.0.0/0".into()], groups: vec![] }] },
             ],
             instances: vec![
-                InstanceInfo { id: "i-1".into(), name: Some("web 1".into()), instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec!["sg-web".into()], public_ip: true, key: Some("lab".into()), state: "running".into(), image_name: Some("ubuntu/images/hvm-ssd/ubuntu-jammy".into()) },
-                InstanceInfo { id: "i-2".into(), name: None, instance_type: "x9.odd".into(), subnet_id: "subnet-3".into(), sgs: vec!["sg-db".into()], public_ip: false, key: None, state: "stopped".into(), image_name: None },
-                InstanceInfo { id: "i-3".into(), name: None, instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec![], public_ip: false, key: None, state: "terminated".into(), image_name: None },
+                InstanceInfo { id: "i-1".into(), name: Some("web 1".into()), instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec!["sg-web".into()], public_ip: true, key: Some("lab".into()), state: "running".into(), image_name: Some("ubuntu/images/hvm-ssd/ubuntu-jammy".into()), spot: true, disk: Some(50) },
+                InstanceInfo { id: "i-2".into(), name: None, instance_type: "x9.odd".into(), subnet_id: "subnet-3".into(), sgs: vec!["sg-db".into()], public_ip: false, key: None, state: "stopped".into(), image_name: None, spot: false, disk: None },
+                InstanceInfo { id: "i-3".into(), name: None, instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec![], public_ip: false, key: None, state: "terminated".into(), image_name: None, spot: false, disk: None },
             ],
             route_tables: vec![
                 RouteTableInfo { id: "rtb-main".into(), name: None, main: true, subnet_ids: vec![], routes: vec![RouteInfo { dest: "10.0.0.0/16".into(), target: "local".into(), state: "active".into() }] },
@@ -385,6 +390,8 @@ mod tests {
         assert_eq!(web1.params["os"], "ubuntu");
         assert_eq!(web1.params["public_ip"], true);
         assert_eq!(web1.params["key"], "lab");
+        assert_eq!(web1.params["spot"], true);
+        assert_eq!(web1.params["disk"], 50);
         assert_eq!(web1.params["sgs"].as_array().unwrap().len(), 1);
         assert_eq!(d.nodes.iter().filter(|n| n.kind == "ec2").count(), 2, "the terminated one is gone");
         assert!(im.notes.iter().any(|n| n.contains("x9.odd")));

@@ -419,11 +419,20 @@ pub fn analyse(d: &Design) -> Analysis {
         if sgs.is_empty() {
             cx.warn(&n.id, "No security group: AWS attaches the VPC's default group (all traffic between its members, everything out). Tick a group in the inspector.");
         }
+        let spot = n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
+        if spot {
+            info.entry(n.id.clone()).or_default().push("Spot: about 70 % cheaper; AWS may stop it with two minutes' notice when it needs the capacity, so the work on it must checkpoint and resume (a web server should not be spot).".into());
+        }
+        if let Some(g) = n.params.get("disk").and_then(|v| v.as_u64()) {
+            if g > 8 {
+                info.entry(n.id.clone()).or_default().push(format!("Root volume {g} GiB gp3: USD {:.2} a month, charged even while the instance is stopped.", g as f64 * crate::pricing::GP3_PER_GIB));
+            }
+        }
         let ssh_in = sgs.iter().any(|g| d.edges.iter().any(|e| e.kind == "traffic" && e.target == g.id && parse_ports(ep(e, "proto"), ep(e, "ports")).map(|(a, b)| a <= 22 && 22 <= b).unwrap_or(false)));
         if ssh_in && p(n, "key").trim().is_empty() {
             cx.warn(&n.id, "SSH is allowed in, but no key pair is named: you could not log in. Name an existing EC2 key pair, or use SSM Session Manager instead of SSH.");
         }
-        summary.insert(n.id.clone(), format!("{t} · {} · USD {:.0}/month{}", p(n, "os"), crate::pricing::instance_hourly(t, &d.region) * crate::pricing::HOURS + if public_ip { 3.65 } else { 0.0 }, if public_ip { " · public IP" } else { "" }));
+        summary.insert(n.id.clone(), format!("{t}{} · {} · USD {:.0}/month{}", if spot { " spot" } else { "" }, p(n, "os"), crate::pricing::instance_hourly(t, &d.region) * if spot { crate::pricing::SPOT_FACTOR } else { 1.0 } * crate::pricing::HOURS + if public_ip { 3.65 } else { 0.0 }, if public_ip { " · public IP" } else { "" }));
         info.entry(n.id.clone()).or_default().push(format!("Security groups: {}", if sgs.is_empty() { "none (the VPC's default)".to_string() } else { sgs.iter().map(|g| g.label.clone()).collect::<Vec<_>>().join(", ") }));
     }
 

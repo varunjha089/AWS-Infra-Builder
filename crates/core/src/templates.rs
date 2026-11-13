@@ -48,6 +48,14 @@ nat nat_a in public_a\n\
 rt public in main: 0.0.0.0/0 -> igw\nrt app in main: 0.0.0.0/0 -> nat_a\nrt db in main\n",
     },
     Template {
+        key: "gpu_box",
+        title: "NN Builder GPU box (spot)",
+        about: "One g4dn.xlarge (T4 GPU) as a Spot instance in a public subnet, SSH only from your own address, 100 GiB disk, Ubuntu: about USD 120 a month if it ran all the time at spot prices (USD 390 on demand), and nothing while stopped but the disk. Change `my_ip` to your address and the key pair name, then add the machine in NN Builder's Connection tab.",
+        text: "net \"NN Builder GPU box\"\nregion ap-south-1\nazs 1\n\nvpc main 10.0.0.0/16\nigw igw in main\nsubnet public_a public 10.0.0.0/24 az a in main rt public\n\
+ec2 gpu_1 g4dn.xlarge in public_a sg ssh_only key my_key public spot disk 100 os ubuntu\nrt public in main: 0.0.0.0/0 -> igw\nsg ssh_only in main\n\ncidr my_ip 203.0.113.7/32\n\n\
+rule my_ip -> ssh_only tcp ssh\n",
+    },
+    Template {
         key: "broken",
         title: "Spot the mistakes",
         about: "A design with the usual mistakes, every one caught: a subnet outside the VPC, two that overlap, a private subnet routed to the Internet Gateway, a NAT in a private subnet, and an isolated subnet with a default route.",
@@ -89,6 +97,12 @@ mod tests {
                 assert!(a.problems[0].contains("is in AZ a"));
             } else if t.key == "two_tier" {
                 assert!(a.problems.iter().all(|p| p.contains("No instance uses")), "{:?}", a.problems);
+            } else if t.key == "gpu_box" {
+                assert_eq!(a.warnings, 0, "{:?}", a.problems);
+                let gpu = a.nodes.iter().find(|n| n.summary.starts_with("g4dn.xlarge spot")).expect("spot in the summary");
+                assert!(gpu.info.iter().any(|i| i.starts_with("Spot:")), "{:?}", gpu.info);
+                assert!(a.cost.total > 100.0 && a.cost.total < 140.0, "{}", a.cost.total);
+                assert!(!a.cost.advice.iter().any(|x| x.contains("tick Spot")), "already spot");
             } else if t.key != "broken" {
                 assert_eq!(a.warnings, 0, "{:?}", a.problems);
             }

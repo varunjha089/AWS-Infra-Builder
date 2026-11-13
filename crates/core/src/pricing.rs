@@ -43,6 +43,10 @@ pub fn eip_idle_hourly(region: &str) -> f64 {
 pub const PUBLIC_IP_HOURLY: f64 = 0.005;
 /// the root volume every instance gets (8 GiB gp3)
 pub const ROOT_VOLUME_MONTHLY: f64 = 8.0 * 0.08;
+/// gp3 storage, USD per GiB-month
+pub const GP3_PER_GIB: f64 = 0.08;
+/// what a Spot instance costs against on-demand, as a typical share (the real price moves; the Costs tab says so)
+pub const SPOT_FACTOR: f64 = 0.3;
 
 /// on-demand price of an instance type: the table has us-east-1 and ap-south-1; other regions are taken as us-east-1 × 1.1
 pub fn instance_hourly(t: &str, region: &str) -> f64 {
@@ -106,12 +110,17 @@ pub fn cost(d: &Design) -> CostReport {
         }
         if n.kind == "ec2" {
             let t = n.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let h = instance_hourly(t, &region);
+            let spot = n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
+            let h = instance_hourly(t, &region) * if spot { SPOT_FACTOR } else { 1.0 };
+            let disk = n.params.get("disk").and_then(|v| v.as_f64()).unwrap_or(8.0);
             let public = n.params.get("public_ip").and_then(|v| v.as_bool()).unwrap_or(false);
             let ip = if public { PUBLIC_IP_HOURLY * HOURS } else { 0.0 };
-            let monthly = h * HOURS + ROOT_VOLUME_MONTHLY + ip;
+            let monthly = h * HOURS + disk * GP3_PER_GIB + ip;
             items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
-                note: format!("{t}: {h:.4} USD/h × {HOURS:.0} h = {} running all month, + {} for the 8 GiB root volume{}", money(h * HOURS), money(ROOT_VOLUME_MONTHLY), if public { format!(", + {} for the public IPv4 address", money(ip)) } else { String::new() }) });
+                note: format!("{t}{}: {h:.4} USD/h × {HOURS:.0} h = {} running all month, + {} for the {disk:.0} GiB root volume{}", if spot { " (spot, about 30 % of on-demand)" } else { "" }, money(h * HOURS), money(disk * GP3_PER_GIB), if public { format!(", + {} for the public IPv4 address", money(ip)) } else { String::new() }) });
+            if !spot && instance_type(t).map(|it| it.0.starts_with('g') || it.0.starts_with('p')).unwrap_or(false) {
+                advice.push(format!("{} is a GPU instance on demand ({} a month running all the time). Spot saves about 70 % for training that checkpoints and resumes (NN Builder does): tick Spot.", n.label, money(instance_hourly(t, &region) * HOURS)));
+            }
             if public {
                 public_ips += 1;
             }
@@ -167,7 +176,7 @@ pub fn cost(d: &Design) -> CostReport {
             format!("On-demand list prices for {} ({} USD/h per NAT Gateway), {HOURS:.0} hours a month, no traffic.", d.region, nat_h),
             "Data transfer is not included: NAT processing and internet egress are charged per GB.".into(),
             "Free: VPC, subnets, Internet Gateway, route tables, security groups. An Elastic IP costs USD 0.005/h; the one a NAT Gateway uses is included above.".into(),
-            "Instances: on-demand Linux prices (us-east-1 and ap-south-1 from the table; other regions as us-east-1 × 1.1), an 8 GiB gp3 root volume, a public IPv4 address at USD 0.005/h when turned on. Spot and Savings Plans are cheaper and come later.".into(),
+            "Instances: on-demand Linux prices (us-east-1 and ap-south-1 from the table; other regions as us-east-1 × 1.1), the gp3 root volume at USD 0.08 per GiB-month, a public IPv4 address at USD 0.005/h when turned on. Spot is taken as 30 % of on-demand (it moves between about 10 and 40 %, and the instance can be interrupted). Savings Plans come later.".into(),
         ],
     }
 }

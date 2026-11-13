@@ -170,6 +170,16 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                     l.params.insert("public_ip".into(), json!(true));
                     rest.remove(i);
                 }
+                "spot" if kw == "ec2" => {
+                    l.params.insert("spot".into(), json!(true));
+                    rest.remove(i);
+                }
+                "disk" if kw == "ec2" => {
+                    match rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                        Some(g) if (8..=16384).contains(&g) => { l.params.insert("disk".into(), json!(g)); rest.drain(i..i + 2); }
+                        _ => { errors.push(err(ln, "disk: write the root volume size in GiB, 8 to 16384, such as `disk 100`")); break; }
+                    }
+                }
                 w => {
                     positional.push(w);
                     i += 1;
@@ -200,11 +210,11 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                         errors.push(err(ln, format!("ec2: \"{t}\" is not an instance type the app knows ({} …)", crate::model::INSTANCE_TYPES.iter().take(4).map(|i| i.0).collect::<Vec<_>>().join(", "))));
                     }
                     l.params.insert("type".into(), json!(t));
-                    for (k, v) in [("os", json!("al2023")), ("key", json!("")), ("public_ip", json!(false))] {
+                    for (k, v) in [("os", json!("al2023")), ("key", json!("")), ("public_ip", json!(false)), ("spot", json!(false)), ("disk", json!(8))] {
                         l.params.entry(k).or_insert(v);
                     }
                 }
-                _ => errors.push(err(ln, "ec2: `ec2 <name> <type> in <subnet> [sg <group,group>] [key <key pair>] [public] [os al2023|ubuntu|debian]`")),
+                _ => errors.push(err(ln, "ec2: `ec2 <name> <type> in <subnet> [sg <group,group>] [key <key pair>] [public] [spot] [disk <GiB>] [os al2023|ubuntu|debian]`")),
             },
             "cidr" => match positional.as_slice() {
                 [c] => { l.params.insert("cidr".into(), json!(c)); }
@@ -394,6 +404,8 @@ pub fn print(d: &Design) -> String {
                 if !sgs.is_empty() { s.push_str(&format!(" sg {}", sgs.join(","))); }
                 if !p(n, "key").is_empty() { s.push_str(&format!(" key {}", p(n, "key"))); }
                 if n.params.get("public_ip").and_then(|v| v.as_bool()).unwrap_or(false) { s.push_str(" public"); }
+                if n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false) { s.push_str(" spot"); }
+                if let Some(g) = n.params.get("disk").and_then(|v| v.as_u64()).filter(|g| *g != 8) { s.push_str(&format!(" disk {g}")); }
                 if !p(n, "os").is_empty() && p(n, "os") != "al2023" { s.push_str(&format!(" os {}", p(n, "os"))); }
                 s
             }
@@ -460,7 +472,7 @@ pub fn help() -> Vec<(String, String)> {
         ("nat <name> in <subnet>".into(), "a NAT Gateway in a public subnet".into()),
         ("rt <name> in <vpc>: <dest> -> <gateway>, …".into(), "a route table and its routes".into()),
         ("sg <name> in <vpc> [egress all|rules]".into(), "a security group; egress all = AWS's default, rules = only what the rules say".into()),
-        ("ec2 <name> <type> in <subnet> [sg a,b] [key <pair>] [public] [os al2023|ubuntu|debian]".into(), "an instance; public = a public IPv4 address (costs money)".into()),
+        ("ec2 <name> <type> in <subnet> [sg a,b] [key <pair>] [public] [spot] [disk <GiB>] [os al2023|ubuntu|debian]".into(), "an instance; public = a public IPv4 address (costs money); spot = about 70 % cheaper, may be interrupted".into()),
         ("cidr <name> <range>".into(), "an address range outside the design, such as `cidr internet 0.0.0.0/0`".into()),
         ("rule <from> -> <to> <tcp|udp|icmp|all> [port|range|name]".into(), "traffic the target lets in from the source (and the source lets out)".into()),
         ("# …".into(), "a comment".into()),
