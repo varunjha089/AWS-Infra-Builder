@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.7.0 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.7.1 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
 Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
@@ -21,7 +21,12 @@ pairs listed with whether the file is here; a Fix moves a NAT Gateway out of a p
 template is now fully repaired by "Fix all safe ones"). 0.7.0: adding an instance asks what it must have (vCPUs, memory,
 GPU or not, OS, hours a month) and offers the types that fit, cheapest first (`pricing::recommend`, `NewInstance.tsx`;
 "Recommend a type…" on an existing block); every instance and scaling group has `hours` (default 730) and its estimate follows
-them instead of a full month; the type table gained the xlarge/2xlarge sizes and the g5 GPU family.
+them instead of a full month; the type table gained the xlarge/2xlarge sizes and the g5 GPU family. 0.7.1: the values are
+the owner's to type: vCPUs and memory are free numbers, any instance type name is accepted (unknown = a warning, price
+unknown, never refused), key pair names are suggested (~/.ssh files, the design, the account's pairs on request); more images:
+Ubuntu 22.04, the Deep Learning AMI (PyTorch) and Base AMI, OpenVPN Access Server (Marketplace), each with its architecture,
+smallest root volume and note, checked (x86-only image on Graviton = error, root volume too small = error with a Fix, DLAMI
+without a GPU = warning, OpenVPN without udp 1194 in = warning).
 Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
@@ -45,7 +50,9 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            (+ asg: tier, min, max, desired), hours (1..=744, 730 = always on; the price follows it); alb params scheme, tier, sg, port, cert, health; s3 params gb, versioning, lifecycle,
                            expire_days; vpce params service, tier, sg;
                            INSTANCE_TYPES (vCPU, GiB, arch, USD/h us-east-1 and ap-south-1; t2 and t3.nano included for imports; xlarge/2xlarge
-                           sizes and the g4dn/g5 GPU types for the recommendations), is_gpu(type); OS (AMI owner + name pattern); parse_ports,
+                           sizes and the g4dn/g5 GPU types for the recommendations), is_gpu(type); OS (key, title, AMI owner, name pattern,
+                           arch "any" | "x86_64", smallest root GiB, note: al2023, ubuntu, ubuntu22, debian, dlami, dlami_base, openvpn),
+                           os_info(key); PORTS also openvpn 1194 and openvpn_admin 943; OS (AMI owner + name pattern); parse_ports,
                            traffic_label; add() (next free CIDR, balanced AZ; ec2 defaults to t4g.micro, no public IP), connect() (edge_kind
                            decides; a traffic arrow = the target's ingress and the source's egress), remove() (with contents), ensure_labels(),
                            arrange() = layout::arrange

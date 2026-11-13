@@ -7,7 +7,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api, errText, type Sizes, type Analysis, type AppState, type DNode, type Design, type EdgeResult, type JobSnap, type Loaded, type NodeResult } from "./api";
-import { NewInstance, HOUR_PRESETS, hoursText } from "./NewInstance";
+import { NewInstance, HOUR_PRESETS, hoursText, type Pick } from "./NewInstance";
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
 import { neon, useTheme } from "./theme";
 
@@ -207,11 +207,16 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
   }, [design, parentKind, selectId, apply, toast, setSelectId]);
   /** the New-instance dialog: for a new block in a subnet, or "change" for the selected instance */
   const [newInst, setNewInst] = useState<{ parent: string } | "change" | null>(null);
-  const pickInstance = (c: { type: string; os: string; hours: number }) => {
+  /** key pair names to suggest: the .pem files in ~/.ssh and the names already on blocks */
+  const [keyFiles, setKeyFiles] = useState<string[]>([]);
+  useEffect(() => { if (newInst) api.keysList().then((k) => setKeyFiles(k.keys.map((f) => f.name.replace(/\.(pem|key)$/, "")))).catch(() => {}); }, [newInst]);
+  const keyNames = Array.from(new Set([...keyFiles, ...design.nodes.filter((n) => n.kind === "ec2" || n.kind === "asg").map((n) => String(n.params.key ?? "")).filter(Boolean)]));
+  const pickInstance = (c: Pick) => {
+    const minDisk = st.os.find((o) => o.key === c.os)?.min_disk ?? 8;
     if (newInst === "change" && selectId) {
-      change({ ...design, nodes: design.nodes.map((n) => (n.id === selectId ? { ...n, params: { ...n.params, ...c } } : n)) }, false);
+      change({ ...design, nodes: design.nodes.map((n) => (n.id === selectId ? { ...n, params: { ...n.params, ...c, disk: Math.max(Number(n.params.disk ?? 8), minDisk) } } : n)) }, false);
     } else if (newInst && newInst !== "change") {
-      api.designAdd(design, "ec2", newInst.parent, c).then((l) => { apply(l); if (l.id) setSelectId(l.id); }).catch((e) => toast(errText(e)));
+      api.designAdd(design, "ec2", newInst.parent, { ...c, disk: minDisk }).then((l) => { apply(l); if (l.id) setSelectId(l.id); }).catch((e) => toast(errText(e)));
     }
     setNewInst(null);
   };
@@ -266,8 +271,8 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
 
   return (
     <div className="design">
-      {newInst && <NewInstance st={st} region={design.region} toast={toast} title={newInst === "change" ? "Recommend an instance type" : "New instance: what must it have?"}
-        initial={newInst === "change" && selected ? { os: String(selected.params.os ?? "al2023"), hours: Number(selected.params.hours ?? 730), gpu: /^[gp]/.test(String(selected.params.type ?? "")), vcpu: st.instance_types.find((t) => t.type === selected.params.type)?.vcpu ?? 2, ram: st.instance_types.find((t) => t.type === selected.params.type)?.memory ?? 1 } : undefined}
+      {newInst && <NewInstance st={st} region={design.region} toast={toast} keyNames={keyNames} title={newInst === "change" ? "Recommend an instance type" : "New instance: what must it have?"}
+        initial={newInst === "change" && selected ? { os: String(selected.params.os ?? "al2023"), hours: Number(selected.params.hours ?? 730), key: String(selected.params.key ?? ""), gpu: /^[gp]/.test(String(selected.params.type ?? "")), vcpu: st.instance_types.find((t) => t.type === selected.params.type)?.vcpu ?? 2, ram: st.instance_types.find((t) => t.type === selected.params.type)?.memory ?? 1 } : undefined}
         onPick={pickInstance} onClose={() => setNewInst(null)} />}
       <aside className="palette">
         <h4>Scope</h4>
@@ -380,8 +385,11 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
                 <div className="small muted">Rules are the arrows: an arrow into this group lets that traffic in from its source; select an arrow to set the protocol and ports.</div>
               </>}
               {selected.kind === "ec2" && <>
-                <label>Instance type<select value={String(selected.params.type ?? "t4g.micro")} onChange={(e) => setParam(selected.id, "type", e.target.value, false)}>
-                  {st.instance_types.map((t) => { const h = design.region === "us-east-1" ? t.us_east_1 : design.region === "ap-south-1" ? t.ap_south_1 : t.us_east_1 * 1.1; return <option key={t.type} value={t.type}>{t.type} · {t.vcpu} vCPU · {t.memory} GiB · {t.arch} · USD {(h * Number(selected.params.hours ?? 730)).toFixed(0)}/month at {Number(selected.params.hours ?? 730)} h</option>; })}</select></label>
+                <label>Instance type (any; the table's ones are suggested)
+                  <input list="aib-types" value={String(selected.params.type ?? "")} onChange={(e) => setParam(selected.id, "type", e.target.value.trim())} />
+                  <datalist id="aib-types">{st.instance_types.map((t) => <option key={t.type} value={t.type}>{t.vcpu} vCPU · {t.memory} GiB · {t.arch}</option>)}</datalist>
+                </label>
+                {(() => { const t = st.instance_types.find((x) => x.type === selected.params.type); const hrs = Number(selected.params.hours ?? 730); if (!t) return <div className="small muted">Not in the app's table: price unknown; it is used as written.</div>; const h = design.region === "us-east-1" ? t.us_east_1 : design.region === "ap-south-1" ? t.ap_south_1 : t.us_east_1 * 1.1; return <div className="small muted">{t.vcpu} vCPU · {t.memory} GiB · {t.arch} · USD {(h * hrs).toFixed(2)}/month at {hrs} h</div>; })()}
                 <div className="row" style={{ alignItems: "flex-end" }}>
                   <label style={{ flex: 1 }}>Hours a month it runs (the price follows this)<select value={HOUR_PRESETS.some(([v]) => v === Number(selected.params.hours ?? 730)) ? Number(selected.params.hours ?? 730) : "custom"} onChange={(e) => setParam(selected.id, "hours", e.target.value === "custom" ? 100 : Number(e.target.value), false)}>
                     {HOUR_PRESETS.map(([v, t]) => <option key={v} value={v}>{t}</option>)}<option value="custom">custom…</option></select></label>
@@ -390,7 +398,11 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
                 {!HOUR_PRESETS.some(([v]) => v === Number(selected.params.hours ?? 730)) && <label>Hours (1 to 744)<input type="number" min={1} max={744} value={Number(selected.params.hours ?? 730)} onChange={(e) => setParam(selected.id, "hours", Math.max(1, Math.min(744, Number(e.target.value) || 1)))} /></label>}
                 <div className="small muted">{hoursText(Number(selected.params.hours ?? 730))}: stop the instance when it is not in use (only the volume is charged then), or the estimate will not hold.</div>
                 <label>Operating system<select value={String(selected.params.os ?? "al2023")} onChange={(e) => setParam(selected.id, "os", e.target.value, false)}>{st.os.map((o) => <option key={o.key} value={o.key}>{o.title}</option>)}</select></label>
-                <label>Key pair (an existing EC2 key pair name; empty = none, use SSM)<input value={String(selected.params.key ?? "")} onChange={(e) => setParam(selected.id, "key", e.target.value)} /></label>
+                {(() => { const o = st.os.find((x) => x.key === selected.params.os); return o?.note ? <div className="small muted">{o.title}: {o.note}.</div> : null; })()}
+                <label>Key pair (an existing EC2 key pair name; empty = none, use SSM)
+                  <input list="aib-keynames-insp" value={String(selected.params.key ?? "")} onChange={(e) => setParam(selected.id, "key", e.target.value)} />
+                  <datalist id="aib-keynames-insp">{keyNames.map((n) => <option key={n} value={n} />)}</datalist>
+                </label>
                 <label className="inline"><input type="checkbox" checked={!!selected.params.public_ip} onChange={(e) => setParam(selected.id, "public_ip", e.target.checked, false)} />Public IPv4 address (USD 3.65 a month)</label>
                 <label className="inline"><input type="checkbox" checked={!!selected.params.spot} onChange={(e) => setParam(selected.id, "spot", e.target.checked, false)} />Spot (about 70 % cheaper; may be interrupted: for training and batch work)</label>
                 <div className="row" style={{ alignItems: "baseline" }}>

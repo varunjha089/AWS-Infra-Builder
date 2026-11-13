@@ -71,7 +71,7 @@ fn app_state(st: State<'_, App>) -> Value {
         "kinds": KINDS.iter().map(|k| json!({"kind": k.0, "title": k.1, "parent": k.2})).collect::<Vec<_>>(),
         "tiers": TIERS,
         "instance_types": INSTANCE_TYPES.iter().map(|i| json!({"type": i.0, "vcpu": i.1, "memory": i.2, "arch": i.3, "us_east_1": i.4, "ap_south_1": i.5})).collect::<Vec<_>>(),
-        "os": OS.iter().map(|o| json!({"key": o.0, "title": o.1})).collect::<Vec<_>>(),
+        "os": OS.iter().map(|o| json!({"key": o.0, "title": o.1, "arch": o.4, "min_disk": o.5, "note": o.6})).collect::<Vec<_>>(),
         "ports": PORTS.iter().map(|p| json!({"name": p.0, "port": p.1})).collect::<Vec<_>>(),
         "endpoint_services": ENDPOINT_SERVICES.iter().map(|e| json!({"service": e.0, "title": e.1, "type": e.2})).collect::<Vec<_>>(),
     })

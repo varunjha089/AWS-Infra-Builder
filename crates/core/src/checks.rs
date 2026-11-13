@@ -407,7 +407,7 @@ pub fn analyse(d: &Design) -> Analysis {
         let public_ip = n.params.get("public_ip").and_then(|v| v.as_bool()).unwrap_or(false);
         let sgs: Vec<&Node> = n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).filter_map(|id| d.node(id)).collect()).unwrap_or_default();
         match instance_type(t) {
-            None => cx.error(&n.id, format!("\"{t}\" is not an instance type the app knows. Choose one in the inspector.")),
+            None => cx.warn(&n.id, format!("\"{t}\" is not in the app's table: its price is unknown and the app cannot check that it exists in {}. Keep it if you know it; \"Recommend a type…\" in the inspector lists the known ones.", d.region)),
             Some(it) => {
                 let hourly = crate::pricing::instance_hourly(t, &d.region);
                 info.entry(n.id.clone()).or_default().push(format!("{t}: {} vCPU, {} GiB, {} · USD {hourly:.4}/h × {:.0} h = USD {:.2} a month while running", it.1, it.2, it.3, crate::pricing::hours_of(n), hourly * crate::pricing::hours_of(n)));
@@ -419,6 +419,30 @@ pub fn analyse(d: &Design) -> Analysis {
                         }
                     }
                 }
+            }
+        }
+        // the image's own rules: architecture, the smallest root volume, what it is for
+        let os = p(n, "os");
+        if let Some(o) = crate::model::os_info(os) {
+            let arch = instance_type(t).map(|it| it.3).unwrap_or("x86_64");
+            if o.4 != "any" && arch != o.4 {
+                cx.error(&n.id, format!("{} is {} only; {t} is {arch} (Graviton). Pick an x86 type (t3, m5, c5, g4dn, g5) or another OS.", o.1, o.4));
+            }
+            let disk = n.params.get("disk").and_then(|v| v.as_u64()).unwrap_or(8);
+            if disk < o.5 {
+                cx.error(&n.id, format!("{} needs a root volume of at least {} GiB (its image is that big; AWS refuses a smaller one): set the root volume to {}.", o.1, o.5, o.5));
+            }
+            if os.starts_with("dlami") && !crate::model::is_gpu(t) {
+                cx.warn(&n.id, format!("The Deep Learning AMI is meant for GPU instances; on {t} its CUDA and drivers only cost disk space. Pick a g4dn or g5 type, or plain Ubuntu."));
+            }
+            if os == "openvpn" {
+                let lets_in = |port: u16| sgs.iter().any(|g| d.edges.iter().filter(|e| e.kind == "traffic" && e.target == g.id).any(|e| parse_ports(ep(e, "proto"), ep(e, "ports")).map(|(a, b)| a <= port && port <= b).unwrap_or(false)));
+                if !lets_in(1194) {
+                    cx.warn(&n.id, "OpenVPN clients connect on udp 1194 and the admin page is tcp 943: draw arrows into the instance's group for them (and tcp 443 for the web login).".to_string());
+                }
+            }
+            if !o.6.is_empty() {
+                info.entry(n.id.clone()).or_default().push(format!("{}: {}.", o.1, o.6));
             }
         }
         if let Some(s) = sub {
@@ -518,7 +542,7 @@ pub fn analyse(d: &Design) -> Analysis {
             cx.error(&g.id, format!("min ≤ desired ≤ max must hold; here min {min}, desired {desired}, max {max}."));
         }
         if instance_type(t).is_none() {
-            cx.error(&g.id, format!("\"{t}\" is not an instance type the app knows."));
+            cx.warn(&g.id, format!("\"{t}\" is not in the app's table: its price is unknown and the app cannot check that it exists."));
         }
         let usable: u64 = subs.iter().filter_map(|s| Cidr::parse(p(s, "cidr")).ok()).map(|c| c.usable()).sum();
         if usable > 0 && max > usable {

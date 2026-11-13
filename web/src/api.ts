@@ -31,7 +31,7 @@ export interface TofuStatus { tofu: string | null; version: string | null; insta
 export interface Loaded { design: Design; analysis: Analysis }
 export interface Host { id: string; label: string; host: string; user: string; port: number; key: string; block: string | null; aws_id: string | null; note: string }
 export interface HostsState { saved: Host[]; suggested: Host[]; ssh: string | null }
-export interface Candidate { type: string; vcpu: number; memory: number; arch: string; gpu: boolean; hourly: number; monthly: number; note: string }
+export interface Candidate { type: string; vcpu: number; memory: number; arch: string; gpu: boolean; hourly: number; monthly: number; note: string; fits: boolean }
 export interface KeyFile { path: string; name: string; kind: string }
 export interface KeyPair { name: string; kind: string; fingerprint: string; file: string | null }
 export interface TextError { line: number; message: string }
@@ -42,7 +42,7 @@ export interface AppState {
   templates: { key: string; title: string; about: string }[]; regions: { id: string; name: string; azs: number }[];
   kinds: { kind: string; title: string; parent: string }[]; tiers: string[];
   instance_types: { type: string; vcpu: number; memory: number; arch: string; us_east_1: number; ap_south_1: number }[];
-  os: { key: string; title: string }[]; ports: { name: string; port: number }[]; endpoint_services: { service: string; title: string; type: string }[];
+  os: { key: string; title: string; arch: string; min_disk: number; note: string }[]; ports: { name: string; port: number }[]; endpoint_services: { service: string; title: string; type: string }[];
 }
 
 export const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));

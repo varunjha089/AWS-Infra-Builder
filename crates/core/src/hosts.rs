@@ -31,8 +31,9 @@ pub struct Host {
 /// the login name the AMI's OS creates
 pub fn guess_user(os: &str) -> &'static str {
     match os {
-        "ubuntu" => "ubuntu",
+        "ubuntu" | "ubuntu22" | "dlami" | "dlami_base" => "ubuntu",
         "debian" => "admin",
+        "openvpn" => "openvpnas",
         _ => "ec2-user",
     }
 }

@@ -272,8 +272,8 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
             },
             "ec2" => match positional.as_slice() {
                 [t] => {
-                    if crate::model::instance_type(t).is_none() {
-                        errors.push(err(ln, format!("ec2: \"{t}\" is not an instance type the app knows ({} …)", crate::model::INSTANCE_TYPES.iter().take(4).map(|i| i.0).collect::<Vec<_>>().join(", "))));
+                    if !t.contains('.') || t.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-')) {
+                        errors.push(err(ln, format!("ec2: \"{t}\" does not look like an instance type (family.size, such as {})", crate::model::INSTANCE_TYPES.iter().take(3).map(|i| i.0).collect::<Vec<_>>().join(", "))));
                     }
                     l.params.insert("type".into(), json!(t));
                     for (k, v) in [("os", json!("al2023")), ("key", json!("")), ("public_ip", json!(false)), ("spot", json!(false)), ("disk", json!(8)), ("hours", json!(730))] {
@@ -293,8 +293,8 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
             },
             "asg" => match positional.as_slice() {
                 [t] => {
-                    if crate::model::instance_type(t).is_none() {
-                        errors.push(err(ln, format!("asg: \"{t}\" is not an instance type the app knows")));
+                    if !t.contains('.') {
+                        errors.push(err(ln, format!("asg: \"{t}\" does not look like an instance type (family.size)")));
                     }
                     l.params.insert("type".into(), json!(t));
                     for (k, v) in [("os", json!("al2023")), ("key", json!("")), ("tier", json!("private")), ("min", json!(1)), ("max", json!(2)), ("desired", json!(1)), ("spot", json!(false)), ("disk", json!(8)), ("hours", json!(730))] {
@@ -721,9 +721,9 @@ mod tests {
         assert_eq!(d.edges.iter().filter(|e| e.kind == "traffic").count(), 3);
         assert_eq!(d.by_label("db").unwrap().params["egress"], "rules");
         assert!(d.by_label("internet").unwrap().parent.is_none());
-        let e = parse("vpc main 10.0.0.0/16\nsg web in main\nrule nobody -> web tcp 443\nrule web -> web tcp 99999\nec2 x t9.huge in main\nrule web web tcp 1\n", None).unwrap_err();
+        let e = parse("vpc main 10.0.0.0/16\nsg web in main\nrule nobody -> web tcp 443\nrule web -> web tcp 99999\nec2 x huge in main\nrule web web tcp 1\n", None).unwrap_err();
         let has = |t: &str| e.iter().any(|x| x.message.contains(t));
-        assert!(has("not an instance type") && has("no block called \"nobody\"") && has("99999") && has("rule <from> -> <to>"), "{e:?}");
+        assert!(has("does not look like an instance type") && has("no block called \"nobody\"") && has("99999") && has("rule <from> -> <to>"), "{e:?}");
         assert_eq!(e.iter().map(|x| x.line).collect::<Vec<_>>(), [3, 4, 5, 6]);
     }
 

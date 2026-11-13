@@ -308,7 +308,8 @@ pub fn to_design(inv: &Inventory) -> Imported {
             notes.push(format!("Instance {}: type {} is not in the app's table; its cost is shown as 0 until the table knows it.", i.name.clone().unwrap_or(i.id.clone()), i.instance_type));
         }
         let image = i.image_name.clone().unwrap_or_default().to_lowercase();
-        let os = if image.contains("ubuntu") { "ubuntu" } else if image.contains("debian") { "debian" } else { "al2023" };
+        let os = if image.contains("deep learning base") { "dlami_base" } else if image.contains("deep learning") { "dlami" } else if image.contains("openvpn") { "openvpn" }
+            else if image.contains("jammy") || image.contains("22.04") { "ubuntu22" } else if image.contains("ubuntu") { "ubuntu" } else if image.contains("debian") { "debian" } else { "al2023" };
         let sgs: Vec<String> = i.sgs.iter().filter_map(|g| sg_node.get(g).cloned()).collect();
         let nid = id();
         d.nodes.push(Node { id: nid, kind: "ec2".into(), label: unique(label_for(&i.name, &i.id, "instance")),
@@ -435,7 +436,7 @@ mod tests {
         assert_eq!(traffic.len(), 5, "443 + ssh in to web, web -> db 5432, db out 443, nfs-out -> nfs-in once: {traffic:?}");
         assert!(im.notes.iter().any(|n| n.contains("sg-gone")));
         let web1 = d.by_label("web_1").unwrap();
-        assert_eq!(web1.params["os"], "ubuntu");
+        assert_eq!(web1.params["os"], "ubuntu22");
         assert_eq!(web1.params["public_ip"], true);
         assert_eq!(web1.params["address"], "3.7.1.2");
         assert_eq!(web1.params["key"], "lab");
@@ -449,9 +450,9 @@ mod tests {
         assert!(d.text.as_ref().unwrap().contains("rt app in prod_vpc: 0.0.0.0/0 -> nat_a, pl-s3 -> s3_endpoint"), "{}", d.text.as_ref().unwrap());
         assert!(d.text.as_ref().unwrap().contains("vpce ssm_ep_2 ssm in prod_vpc tier private sg prod_db"), "{}", d.text.as_ref().unwrap());
         let a = analyse(d);
-        // the unknown type is an error on its block; everything else is fine
-        assert_eq!(a.errors, 1, "{:?}", a.problems);
-        assert!(a.problems.iter().any(|p| p.contains("x9.odd")));
+        // the unknown type is a warning on its block (the owner may know it); nothing is red
+        assert_eq!(a.errors, 0, "{:?}", a.problems);
+        assert!(a.problems.iter().any(|p| p.contains("x9.odd") && p.contains("not in the app's table")));
         assert!(d.text.as_ref().unwrap().contains("subnet public_a public 10.0.0.0/20 az a in prod_vpc rt public"), "{}", d.text.as_ref().unwrap());
         assert_eq!(d.by_label("prod_vpc").unwrap().params["aws_id"], "vpc-0abc");
     }

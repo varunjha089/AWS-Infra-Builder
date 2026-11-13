@@ -123,6 +123,19 @@ pub fn fixes(d: &Design) -> Vec<Fix> {
         }
     }
 
+    // the image's own needs: a big enough root volume, an x86 type for an x86-only image
+    for n in d.nodes.iter().filter(|n| n.kind == "ec2") {
+        let Some(o) = crate::model::os_info(p(n, "os")) else { continue };
+        let disk = n.params.get("disk").and_then(|v| v.as_u64()).unwrap_or(8);
+        if disk < o.5 {
+            out.push(fix("disk_min", n, format!("Set the root volume to {} GiB", o.5), &format!("what the image needs; about USD {:.2} a month more", (o.5 - disk) as f64 * 0.08), false));
+        }
+        if o.4 == "x86_64" && instance_type(p(n, "type")).map(|it| it.3 == "arm64").unwrap_or(false) {
+            let twin = x86_twin(p(n, "type"));
+            out.push(fix("os_arch", n, format!("Use {twin} (x86_64) for this image"), "the same size on x86; a little dearer than Graviton", false));
+        }
+    }
+
     for c in d.nodes.iter().filter(|n| n.kind == "cidr") {
         if !d.edges.iter().any(|e| e.source == c.id || e.target == c.id) {
             out.push(fix("delete", c, "Delete this range".into(), "", true));
@@ -156,7 +169,7 @@ pub fn fixes(d: &Design) -> Vec<Fix> {
     for n in d.nodes.iter().filter(|n| n.kind == "ec2" || n.kind == "asg") {
         let t = p(n, "type");
         match instance_type(t) {
-            None => out.push(fix("type", n, format!("Use {} instead of {t}", nearest_type(t)), "the nearest type the app knows; change it in the inspector if another fits", true)),
+            None => out.push(fix("type", n, format!("Use {} instead of {t}", nearest_type(t)), "the nearest type the app knows; keep yours if you know it exists", false)),
             Some(it) if it.3 == "x86_64" => {
                 if let Some(arm) = crate::pricing::arm_equivalent(t) {
                     let save = (crate::pricing::instance_hourly(t, &d.region) - crate::pricing::instance_hourly(arm, &d.region)) * crate::pricing::hours_of(n);
@@ -217,6 +230,14 @@ fn nat_home(d: &Design, nat: &Node) -> Option<String> {
     let vpc = s.parent.as_ref()?;
     let public: Vec<&Node> = d.children(vpc).into_iter().filter(|o| o.kind == "subnet" && p(o, "tier") == "public").collect();
     public.iter().find(|o| p(o, "az") == p(s, "az")).or(public.first()).map(|o| o.id.clone())
+}
+
+/// the x86 type of the same size as a Graviton one (t4g -> t3, m6g -> m5, c6g -> c5), else t3 of that size, else t3.micro
+fn x86_twin(t: &str) -> String {
+    let (family, size) = t.split_once('.').unwrap_or((t, "micro"));
+    let fam = match family { "t4g" => "t3", "m6g" => "m5", "c6g" => "c5", "r6g" => "m5", _ => "t3" };
+    let want = format!("{fam}.{size}");
+    if instance_type(&want).is_some() { want } else if instance_type(&format!("t3.{size}")).is_some() { format!("t3.{size}") } else { "t3.micro".into() }
 }
 
 pub fn apply(d: &mut Design, f: &Fix, my_ip: Option<&str>) -> Result<(), String> {
@@ -284,6 +305,14 @@ pub fn apply(d: &mut Design, f: &Fix, my_ip: Option<&str>) -> Result<(), String>
         }
         "type" => {
             let t = d.node(&f.target).map(|n| nearest_type(p(n, "type")).to_string()).ok_or("block gone")?;
+            set(d, "type", json!(t));
+        }
+        "disk_min" => {
+            let min = d.node(&f.target).and_then(|n| crate::model::os_info(p(n, "os"))).map(|o| o.5).ok_or("unknown image")?;
+            set(d, "disk", json!(min));
+        }
+        "os_arch" => {
+            let t = d.node(&f.target).map(|n| x86_twin(p(n, "type"))).ok_or("block gone")?;
             set(d, "type", json!(t));
         }
         "graviton" => {
@@ -362,11 +391,11 @@ rule internet -> web tcp 22\nrule internet -> web tcp 443\nrule web -> db tcp 54
         let (ca, cb) = (d.param_str(&d.by_label("pa").unwrap().id, "cidr").to_string(), d.param_str(&d.by_label("pb").unwrap().id, "cidr").to_string());
         assert!(ca != cb && (ca == "10.0.16.0/20" || cb == "10.0.16.0/20"), "{ca} {cb}");
         assert!(d.edges.iter().any(|e| e.kind == "attach" && e.source == d.by_label("pb").unwrap().id && e.target == pub_rt), "pb reuses the public table");
-        assert_eq!(d.by_label("srv").unwrap().params["type"], "t3.micro");
+        assert_eq!(d.by_label("srv").unwrap().params["type"], "z1.weird", "the type is the owner's choice: not changed by the safe fixes");
         assert_eq!(d.by_label("dbhost").unwrap().params["public_ip"], false);
         // the unsafe ones are still offered
         let left: Vec<String> = fixes(&d).into_iter().map(|f| f.kind).collect();
-        assert!(left.iter().any(|k| k == "my_ip") && left.iter().any(|k| k == "graviton") && !left.iter().any(|k| k == "type"), "{left:?}");
+        assert!(left.iter().any(|k| k == "my_ip") && left.iter().any(|k| k == "graviton") && left.iter().any(|k| k == "type"), "{left:?}");
 
         // SSH only from my address: a new range, the arrow re-pointed, 443 still open to the world
         let f = fixes(&d).into_iter().find(|f| f.kind == "my_ip").unwrap();
@@ -388,6 +417,30 @@ rule internet -> web tcp 22\nrule internet -> web tcp 443\nrule web -> db tcp 54
 mod template_tests {
     use super::*;
     use crate::{checks, templates};
+
+    #[test]
+    fn a_deep_learning_image_on_a_small_graviton_box_gets_its_fixes() {
+        let mut d = crate::dsl::parse("net \"g\"\nregion ap-south-1\nazs 1\n\nvpc main 10.0.0.0/16\nsubnet a public 10.0.0.0/24 az a in main\nec2 box t4g.micro in a os dlami\n", None).unwrap();
+        let a = checks::analyse(&d);
+        let msgs = a.nodes.iter().find(|n| n.title == "box" || n.id == d.by_label("box").unwrap().id).map(|n| n.messages.join(" | ")).unwrap_or_default();
+        assert!(msgs.contains("x86_64 only") && msgs.contains("at least 30 GiB") && msgs.contains("meant for GPU"), "{msgs}");
+        let fs = fixes(&d);
+        let disk = fs.iter().find(|f| f.kind == "disk_min").unwrap();
+        let arch = fs.iter().find(|f| f.kind == "os_arch").unwrap();
+        assert_eq!(arch.title, "Use t3.micro (x86_64) for this image");
+        apply(&mut d, disk, None).unwrap();
+        apply(&mut d, arch, None).unwrap();
+        let b = d.by_label("box").unwrap();
+        assert_eq!((b.params["disk"].as_u64(), b.params["type"].as_str()), (Some(30), Some("t3.micro")));
+        assert_eq!(x86_twin("m6g.xlarge"), "m5.xlarge");
+        assert_eq!(x86_twin("r6g.2xlarge"), "t3.2xlarge");
+        // an unknown type is a warning, not an error, and its fix is not among the safe ones
+        d.nodes.iter_mut().find(|n| n.label == "box").unwrap().params.insert("type".into(), serde_json::json!("m7i.large"));
+        let a = checks::analyse(&d);
+        let r = a.nodes.iter().find(|n| n.id == d.by_label("box").unwrap().id).unwrap();
+        assert_eq!(r.status, "warn", "{:?}", r.messages);
+        assert!(fixes(&d).iter().any(|f| f.kind == "type" && !f.safe));
+    }
 
     #[test]
     fn the_spot_the_mistakes_template_is_repaired_by_the_safe_fixes() {

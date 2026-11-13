@@ -24,14 +24,22 @@ pub struct Candidate {
     /// at the asked hours a month
     pub monthly: f64,
     pub note: String,
+    /// false = smaller than asked (nothing in the table fits; the biggest are listed)
+    pub fits: bool,
 }
 
 pub fn recommend(vcpu: u8, ram: f64, gpu: bool, region: &str, hours: f64) -> Vec<Candidate> {
     let hours = if hours.is_finite() { hours.clamp(1.0, 744.0) } else { HOURS };
     let mut v: Vec<Candidate> = crate::model::INSTANCE_TYPES.iter().filter(|i| i.1 >= vcpu && i.2 >= ram && crate::model::is_gpu(i.0) == gpu).map(|i| {
         let h = instance_hourly(i.0, region);
-        Candidate { r#type: i.0.into(), vcpu: i.1, memory: i.2, arch: i.3.into(), gpu, hourly: h, monthly: h * hours, note: String::new() }
+        Candidate { r#type: i.0.into(), vcpu: i.1, memory: i.2, arch: i.3.into(), gpu, hourly: h, monthly: h * hours, note: String::new(), fits: true }
     }).collect();
+    if v.is_empty() {
+        // the biggest the table has, so the user sees where it ends and can type a bigger type by hand
+        let mut all: Vec<&(&str, u8, f64, &str, f64, f64)> = crate::model::INSTANCE_TYPES.iter().filter(|i| crate::model::is_gpu(i.0) == gpu).collect();
+        all.sort_by(|a, b| (b.1, b.2).partial_cmp(&(a.1, a.2)).unwrap_or(std::cmp::Ordering::Equal));
+        return all.into_iter().take(3).map(|i| { let h = instance_hourly(i.0, region); Candidate { r#type: i.0.into(), vcpu: i.1, memory: i.2, arch: i.3.into(), gpu, hourly: h, monthly: h * hours, note: "smaller than asked: the app's table ends here; a bigger type can be typed by hand".into(), fits: false } }).collect();
+    }
     v.sort_by(|a, b| a.hourly.partial_cmp(&b.hourly).unwrap_or(std::cmp::Ordering::Equal));
     for (k, c) in v.iter_mut().enumerate() {
         c.note = if k == 0 { "cheapest that fits".into() } else if c.arch == "arm64" { "Graviton (arm64): Linux only, most software has arm builds".into() } else if c.vcpu > vcpu || c.memory > ram { "more than asked".into() } else { "x86_64".into() };
@@ -299,7 +307,8 @@ mod tests {
         assert!((r[0].monthly - 0.0336 * 176.0).abs() < 0.001);
         assert!(r.iter().all(|c| c.vcpu >= 2 && c.memory >= 4.0 && !c.gpu));
         assert_eq!(recommend(4, 16.0, true, "ap-south-1", 730.0)[0].r#type, "g4dn.xlarge");
-        assert!(recommend(64, 1.0, false, "us-east-1", 730.0).is_empty());
+        let big = recommend(64, 1.0, false, "us-east-1", 730.0);
+        assert!(!big.is_empty() && big.iter().all(|c| !c.fits) && big[0].vcpu == 8, "{big:?}");
         assert_eq!(recommend(1, 0.5, false, "us-east-1", 10000.0)[0].monthly, 0.0042 * 744.0);
         let mut d = crate::dsl::parse("net \"h\"\nregion ap-south-1\nazs 1\n\nvpc main 10.0.0.0/16\nsubnet a public 10.0.0.0/24 az a in main\nec2 box t4g.micro in a hours 176\n", None).unwrap();
         let c = cost(&d);

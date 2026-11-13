@@ -113,7 +113,7 @@ pub fn endpoint_type(service: &str) -> Option<&'static str> {
 }
 
 /// the common ports by name, for the arrow label and the checks
-pub const PORTS: &[(&str, u16)] = &[("ssh", 22), ("rdp", 3389), ("http", 80), ("https", 443), ("mysql", 3306), ("postgres", 5432), ("mssql", 1433), ("mongodb", 27017), ("redis", 6379)];
+pub const PORTS: &[(&str, u16)] = &[("ssh", 22), ("rdp", 3389), ("http", 80), ("https", 443), ("openvpn", 1194), ("openvpn_admin", 943), ("mysql", 3306), ("postgres", 5432), ("mssql", 1433), ("mongodb", 27017), ("redis", 6379)];
 
 /// (type, vCPU, memory GiB, arch, USD/h in us-east-1, USD/h in ap-south-1); other regions: us-east-1 × 1.1 (said in the assumptions)
 pub const INSTANCE_TYPES: &[(&str, u8, f64, &str, f64, f64)] = &[
@@ -164,11 +164,23 @@ pub fn instance_type(t: &str) -> Option<&'static (&'static str, u8, f64, &'stati
 }
 
 /// (os key, title, the AMI search: owner and name pattern)
-pub const OS: &[(&str, &str, &str, &str)] = &[
-    ("al2023", "Amazon Linux 2023", "amazon", "al2023-ami-2023.*-{arch}"),
-    ("ubuntu", "Ubuntu 24.04 LTS", "099720109477", "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-{ubuntu_arch}-server-*"),
-    ("debian", "Debian 12", "136693071363", "debian-12-{arch}-*"),
+/// (key, title, AMI owner, AMI name pattern, architectures "any" | "x86_64", smallest root volume in GiB, what to know)
+pub const OS: &[(&str, &str, &str, &str, &str, u64, &str)] = &[
+    ("al2023", "Amazon Linux 2023", "amazon", "al2023-ami-2023.*-{arch}", "any", 8, ""),
+    ("ubuntu", "Ubuntu 24.04 LTS", "099720109477", "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-{ubuntu_arch}-server-*", "any", 8, ""),
+    ("ubuntu22", "Ubuntu 22.04 LTS", "099720109477", "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-{ubuntu_arch}-server-*", "any", 8, ""),
+    ("debian", "Debian 12", "136693071363", "debian-12-{arch}-*", "any", 8, ""),
+    ("dlami", "Deep Learning AMI: PyTorch, CUDA, Nvidia drivers (Ubuntu 24.04)", "898082745236", "Deep Learning OSS Nvidia Driver AMI GPU PyTorch * (Ubuntu 24.04) *", "x86_64", 30,
+     "for GPU instances (g4dn, g5): PyTorch, CUDA and the drivers are installed; root volume at least 30 GiB; log in as ubuntu"),
+    ("dlami_base", "Deep Learning Base AMI: CUDA and Nvidia drivers only (Ubuntu 24.04)", "898082745236", "Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 24.04) *", "x86_64", 30,
+     "for GPU instances; install your own framework on it; root volume at least 30 GiB; log in as ubuntu"),
+    ("openvpn", "OpenVPN Access Server (AWS Marketplace, free for 2 connections)", "aws-marketplace", "OpenVPN Access Server Community Image-*", "x86_64", 8,
+     "subscribe once in AWS Marketplace before Apply (the free BYOL listing); let in udp 1194 (clients), tcp 443 and tcp 943 (admin); log in as openvpnas"),
 ];
+
+pub fn os_info(key: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str, &'static str, u64, &'static str)> {
+    OS.iter().find(|o| o.0 == key)
+}
 
 pub const TIERS: &[&str] = &["public", "private", "isolated"];
 
