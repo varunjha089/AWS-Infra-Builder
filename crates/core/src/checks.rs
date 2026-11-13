@@ -341,7 +341,9 @@ pub fn analyse(d: &Design) -> Analysis {
     for g in d.nodes.iter().filter(|n| n.kind == "sg") {
         let inbound: Vec<&crate::model::Edge> = d.edges.iter().filter(|e| e.kind == "traffic" && e.target == g.id).collect();
         let outbound: Vec<&crate::model::Edge> = d.edges.iter().filter(|e| e.kind == "traffic" && e.source == g.id).collect();
-        let members: Vec<&Node> = d.nodes.iter().filter(|n| n.kind == "ec2" && n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().any(|v| v.as_str() == Some(&g.id))).unwrap_or(false)).collect();
+        // instances and scaling groups tick groups; a balancer and an interface endpoint name one
+        let members: Vec<&Node> = d.nodes.iter().filter(|n| ((n.kind == "ec2" || n.kind == "asg") && n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().any(|v| v.as_str() == Some(&g.id))).unwrap_or(false))
+            || ((n.kind == "alb" || n.kind == "vpce") && p(n, "sg") == g.id)).collect();
         let egress_all = p(g, "egress") != "rules";
         let mut lines = vec![];
         for e in &inbound {
@@ -363,7 +365,7 @@ pub fn analyse(d: &Design) -> Analysis {
             cx.warn(&g.id, "Egress is \"all\" (AWS's default), so the arrows from this group to an address range add nothing. Set egress to \"rules\" to allow out only what the arrows say.");
         }
         if members.is_empty() {
-            cx.warn(&g.id, "No instance uses this security group. Tick it on an instance, or delete the group.");
+            cx.warn(&g.id, "Nothing uses this security group. Tick it on an instance or a scaling group, choose it on a balancer, or delete it.");
         }
         if inbound.is_empty() && (egress_all || outbound.is_empty()) {
             cx.warn(&g.id, "No rule lets anything in: instances in this group cannot be reached. Draw an arrow from a group or an address range to it.");
@@ -446,6 +448,94 @@ pub fn analyse(d: &Design) -> Analysis {
         info.entry(n.id.clone()).or_default().push(format!("Security groups: {}", if sgs.is_empty() { "none (the VPC's default)".to_string() } else { sgs.iter().map(|g| g.label.clone()).collect::<Vec<_>>().join(", ") }));
     }
 
+    // ---- load balancers and Auto Scaling groups
+    let tier_subnets = |vpc: &Option<String>, tier: &str| -> Vec<&Node> { d.nodes.iter().filter(|s| s.kind == "subnet" && s.parent == *vpc && p(s, "tier") == tier).collect() };
+    let azs_of = |subs: &[&Node]| { let mut a: Vec<&str> = subs.iter().map(|s| p(s, "az")).collect(); a.sort_unstable(); a.dedup(); a.len() };
+    let allows_in = |sg_id: &str, from: Option<&str>, port: u16| d.edges.iter().any(|e| e.kind == "traffic" && e.target == sg_id && from.map(|f| e.source == f).unwrap_or(true) && parse_ports(ep(e, "proto"), ep(e, "ports")).map(|(a, b)| a <= port && port <= b).unwrap_or(false));
+    for lb in d.nodes.iter().filter(|n| n.kind == "alb") {
+        let tier = p(lb, "tier");
+        let subs = tier_subnets(&lb.parent, tier);
+        let azs = azs_of(&subs);
+        let port = lb.params.get("port").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+        let cert = p(lb, "cert").trim();
+        if azs < 2 {
+            cx.error(&lb.id, format!("A load balancer needs subnets in at least two Availability Zones (AWS rule); the {tier} tier has {azs}. Add a {tier} subnet in another AZ, or raise the AZ count."));
+        }
+        if p(lb, "scheme") == "internet" && tier != "public" {
+            cx.error(&lb.id, "An internet-facing load balancer must sit in public subnets (with a route to the Internet Gateway). Set its tier to public, or make it internal.");
+        }
+        if port == 443 && cert.is_empty() {
+            cx.error(&lb.id, "HTTPS on 443 needs a certificate: name an ACM certificate ARN, or use port 80 (HTTP) for now.");
+        }
+        if !cert.is_empty() && !cert.starts_with("arn:aws:acm:") {
+            cx.error(&lb.id, "The certificate must be an ACM certificate ARN (arn:aws:acm:…), in the same region.");
+        }
+        let sg = d.node(p(lb, "sg")).filter(|g| g.kind == "sg");
+        match sg {
+            None => cx.warn(&lb.id, "No security group: the balancer would use the VPC's default group, which lets nothing in from the internet. Make a group with 443 (or 80) in from anywhere and choose it."),
+            Some(g) => {
+                if !allows_in(&g.id, None, port) {
+                    cx.warn(&lb.id, format!("Its group {} does not let port {port} in: nobody can reach the balancer. Draw an arrow from the internet (or the callers) to {} with tcp {port}.", g.label, g.label));
+                }
+            }
+        }
+        let targets: Vec<(&crate::model::Edge, &Node)> = d.edges.iter().filter(|e| e.kind == "target" && e.source == lb.id).filter_map(|e| Some((e, d.node(&e.target)?))).collect();
+        if targets.is_empty() {
+            cx.warn(&lb.id, "No target: draw an arrow from the balancer to an Auto Scaling group or an instance.");
+        }
+        for (e, t) in &targets {
+            let tport = e.params.get("port").and_then(|v| v.as_u64()).unwrap_or(8080) as u16;
+            let tsgs: Vec<&str> = t.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+            if let Some(g) = sg {
+                if !tsgs.iter().any(|ts| allows_in(ts, Some(&g.id), tport)) {
+                    cx.warn(&e.id, format!("{} does not let port {tport} in from the balancer's group {}: health checks would fail. Draw an arrow {} → {}'s group with tcp {tport}.", t.label, g.label, g.label, t.label));
+                }
+            }
+            if t.kind == "ec2" && t.parent.as_ref().and_then(|s| d.node(s)).map(|s| p(s, "tier") == "public").unwrap_or(false) && t.params.get("public_ip").and_then(|v| v.as_bool()).unwrap_or(false) {
+                cx.warn(&t.id, "Behind a load balancer the instance needs no public IP (USD 3.65 a month): turn it off and move it to a private subnet.");
+            }
+        }
+        let monthly = crate::pricing::alb_hourly(&d.region) * crate::pricing::HOURS;
+        info.entry(lb.id.clone()).or_default().push(format!("{} · {} subnets in {azs} AZ{} · USD {monthly:.2} a month idle plus capacity units (about USD 6 per LCU-month)", if p(lb, "scheme") == "internet" { "internet-facing" } else { "internal" }, subs.len(), if azs == 1 { "" } else { "s" }));
+        summary.insert(lb.id.clone(), format!("{} · {} :{port} · USD {monthly:.0}/month + LCU", p(lb, "scheme"), if cert.is_empty() { "HTTP" } else { "HTTPS" }));
+    }
+    for g in d.nodes.iter().filter(|n| n.kind == "asg") {
+        let tier = p(g, "tier");
+        let subs = tier_subnets(&g.parent, tier);
+        let num = |k: &str, dflt: u64| g.params.get(k).and_then(|v| v.as_u64()).unwrap_or(dflt);
+        let (min, max, desired) = (num("min", 1), num("max", 2), num("desired", 1));
+        let t = p(g, "type");
+        if subs.is_empty() {
+            cx.error(&g.id, format!("No {tier} subnet in this VPC to launch into. Choose another tier, or add a subnet."));
+        }
+        if !(min <= desired && desired <= max) {
+            cx.error(&g.id, format!("min ≤ desired ≤ max must hold; here min {min}, desired {desired}, max {max}."));
+        }
+        if instance_type(t).is_none() {
+            cx.error(&g.id, format!("\"{t}\" is not an instance type the app knows."));
+        }
+        let usable: u64 = subs.iter().filter_map(|s| Cidr::parse(p(s, "cidr")).ok()).map(|c| c.usable()).sum();
+        if usable > 0 && max > usable {
+            cx.warn(&g.id, format!("max {max} instances will not fit: the {tier} subnets have {usable} usable addresses together."));
+        }
+        if azs_of(&subs) < 2 && max > 1 {
+            cx.warn(&g.id, "All instances are in one AZ: an outage of that zone stops the service. Add a subnet of this tier in another AZ.");
+        }
+        let sgs: Vec<&Node> = g.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).filter_map(|id| d.node(id)).collect()).unwrap_or_default();
+        if sgs.is_empty() {
+            cx.warn(&g.id, "No security group: the instances get the VPC's default group. Tick a group.");
+        }
+        let spot = g.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
+        let h = crate::pricing::instance_hourly(t, &d.region) * if spot { crate::pricing::SPOT_FACTOR } else { 1.0 };
+        info.entry(g.id.clone()).or_default().push(format!("{t}{} × {desired} desired ({min}–{max}) in {} {tier} subnet{} ({} AZ{}): USD {:.2} a month at the desired size", if spot { " spot" } else { "" }, subs.len(), if subs.len() == 1 { "" } else { "s" }, azs_of(&subs), if azs_of(&subs) == 1 { "" } else { "s" }, h * crate::pricing::HOURS * desired as f64));
+        if spot {
+            info.entry(g.id.clone()).or_default().push("Spot: the group replaces interrupted instances by itself, which makes Spot safe for stateless servers behind a balancer.".into());
+        } else if desired >= 2 && d.edges.iter().any(|e| e.kind == "target" && e.target == g.id) {
+            info.entry(g.id.clone()).or_default().push("Behind a balancer the instances are replaceable: Spot would cut this about 70 %, and the group replaces interrupted ones.".into());
+        }
+        summary.insert(g.id.clone(), format!("{desired}× {t}{} · {min}–{max} · USD {:.0}/month", if spot { " spot" } else { "" }, h * crate::pricing::HOURS * desired as f64));
+    }
+
     // ---- VPC endpoints
     for ep_node in d.nodes.iter().filter(|n| n.kind == "vpce") {
         let svc = p(ep_node, "service");
@@ -510,6 +600,7 @@ pub fn analyse(d: &Design) -> Analysis {
             "route" => ep(e, "dest").to_string(),
             "attach" => "uses".into(),
             "traffic" => traffic_label(ep(e, "proto"), ep(e, "ports")),
+            "target" => format!("→ :{}", e.params.get("port").and_then(|v| v.as_u64()).unwrap_or(8080)),
             _ => String::new(),
         };
         edge_results.push(EdgeResult { id: e.id.clone(), status: cx.status.get(&e.id).cloned().unwrap_or_else(|| "ok".into()), messages: cx.msgs.get(&e.id).cloned().unwrap_or_default(), label });
@@ -662,7 +753,7 @@ mod tests {
         assert_eq!(status(&a, &d, "lonely"), "ok", "{}", messages(&a, &d, "lonely"));
         assert!(messages(&a, &d, "web").contains("Egress is \"all\""), "web -> internet with egress all: {}", messages(&a, &d, "web"));
         assert!(!messages(&a, &d, "db").contains("Egress"), "{}", messages(&a, &d, "db"));
-        assert!(messages(&a, &d, "idle").contains("No instance uses"));
+        assert!(messages(&a, &d, "idle").contains("Nothing uses"));
         assert!(messages(&a, &d, "unused").contains("No rule uses"));
         let em: Vec<String> = a.edges.iter().flat_map(|e| e.messages.clone()).collect();
         assert!(em.iter().any(|m| m.contains("ssh open to the whole internet")), "{em:?}");
@@ -674,6 +765,22 @@ mod tests {
         assert!(job.info.iter().any(|i| i.contains("t4g.small (Graviton, same size) would save")), "{:?}", job.info);
         assert!(a.cost.items.iter().any(|i| i.kind == "ec2"));
         assert!(a.cost.total > 20.0, "{}", a.cost.total);
+    }
+
+    #[test]
+    fn balancer_rules() {
+        let d = design("region ap-south-1\nazs 2\nvpc main 10.0.0.0/16\nigw igw in main\nsubnet pub_a public 10.0.0.0/24 az a in main rt pub\nsubnet pub_b public 10.0.1.0/24 az b in main rt pub\nsubnet app_a private 10.0.2.0/24 az a in main\nrt pub in main: 0.0.0.0/0 -> igw\nsg app in main\nsg lb in main\n\
+            alb web internet in main tier public sg lb port 443\nalb lonely internal in main tier private\nasg app_servers t4g.micro in main tier private min 1 max 300 desired 2 sg app\n\ncidr internet 0.0.0.0/0\n\ntarget web -> app_servers 8080\n\nrule internet -> lb tcp 443\n");
+        let a = analyse(&d);
+        assert!(messages(&a, &d, "web").contains("needs a certificate"), "{}", messages(&a, &d, "web"));
+        assert_eq!(status(&a, &d, "web"), "error");
+        assert!(messages(&a, &d, "lonely").contains("at least two Availability Zones"));
+        assert!(messages(&a, &d, "lonely").contains("No security group"));
+        assert!(messages(&a, &d, "app_servers").contains("will not fit"), "{}", messages(&a, &d, "app_servers"));
+        assert!(messages(&a, &d, "app_servers").contains("one AZ"));
+        let em: Vec<String> = a.edges.iter().flat_map(|e| e.messages.clone()).collect();
+        assert!(em.iter().any(|m| m.contains("health checks would fail")), "{em:?}");
+        assert!(a.cost.items.iter().any(|i| i.kind == "alb") && a.cost.items.iter().any(|i| i.kind == "asg"));
     }
 
     #[test]

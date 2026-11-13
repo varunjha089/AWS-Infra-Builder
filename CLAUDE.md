@@ -4,8 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.4.0 (13 November 2026): phases 0, 1 and 2 of the roadmap in `IDEA.md` (the full design; read it before changing the model), plus
-credentials, import and costs pulled forward. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
+Version 0.5.0 (13 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
+template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
+Balancer + Auto Scaling group with target arrows. Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
 another account (account guard) or the estimate exceeds the project's budget without a tick (budget guard). The app draws VPCs, subnets, Internet/NAT Gateways, route tables, security groups with
@@ -22,8 +24,11 @@ only read (identity, import, plan). Still to come (`IDEA.md` §13): ALB/ASG/RDS/
 Cargo.toml                 workspace: crates/core, app/src-tauri (version in [workspace.package], app/src-tauri/tauri.conf.json, web/package.json)
 crates/core/src/           aib-core: no UI, no AWS calls
   model.rs                 Design {name, region, azs, nodes, edges, text}; Node {id, kind, label, params, parent, x, y, w, h} (positions relative to
-                           the parent); Edge {kind "attach" | "route" | "traffic", params.dest | params.proto + ports}; KINDS (vpc, subnet, igw,
-                           nat, rt, sg, ec2, cidr) with the kind each lives in ("" = the region); REGIONS with AZ counts; PORTS by name;
+                           the parent); Edge {kind "attach" | "route" | "traffic" | "target", params.dest | proto + ports | port}; KINDS (vpc,
+                           subnet, igw, nat, rt, sg, ec2, cidr, vpce, s3, alb, asg) with the kind each lives in ("" = the region); REGIONS with AZ
+                           counts; PORTS by name; ENDPOINT_SERVICES (gateway | interface); ec2/asg params type, os, key, public_ip, sgs, spot, disk
+                           (+ asg: tier, min, max, desired); alb params scheme, tier, sg, port, cert, health; s3 params gb, versioning, lifecycle,
+                           expire_days; vpce params service, tier, sg;
                            INSTANCE_TYPES (vCPU, GiB, arch, USD/h us-east-1 and ap-south-1); OS (AMI owner + name pattern); parse_ports,
                            traffic_label; add() (next free CIDR, balanced AZ; ec2 defaults to t4g.micro, no public IP), connect() (edge_kind
                            decides; a traffic arrow = the target's ingress and the source's egress), remove() (with contents), ensure_labels(),
@@ -38,7 +43,10 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            containers grow); lines vpc, subnet, igw, nat, rt, sg [egress rules], ec2 <type> [sg a,b] [key k] [public] [os x],
                            cidr <range>, rule <from> -> <to> <proto> [ports]; print(design) in a stable order (per VPC: igw, subnets tier-major,
                            nats, instances, route tables by the tier they serve, groups; then address ranges; then rules); sync() = ensure_labels
-                           + print into design.text; help() for the Text tab
+                           + print into design.text; help() for the Text tab. Also: `spot`, `disk n` on ec2/asg; `vpce <svc> in <vpc> [tier] [sg]`;
+                           `s3 <name> [gb] [versioning] [lifecycle] [expire]`; `alb <name> internet|internal in <vpc> [tier] [sg] [port] [cert]
+                           [health]`; `asg <name> <type> in <vpc> [tier] [min] [max] [desired] [sg] …`; `target <alb> -> <asg|ec2> <port>`. Only an
+                           `rt` line has routes after `:` (ARNs hold colons).
   hcl.rs                   generate(&Design) -> Files {main.tf, variables.tf, outputs.tf} for the AWS provider 5: aws_vpc, aws_subnet,
                            aws_internet_gateway, aws_eip + aws_nat_gateway, aws_route_table/route/association, aws_security_group + one
                            aws_vpc_security_group_ingress_rule per arrow in (and egress rules, or the allow-all written down), data aws_ami per
@@ -123,6 +131,8 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
 - A new block kind: `model::KINDS` (+ `defaults`, `edge_kind`, `arrange` placement), `checks.rs` (its rules), `pricing.rs` (its idle cost and the
   cheaper alternative), `dsl.rs` (parse the line and print it), `hcl.rs` (its resources), `import.rs` if AWS has it, `Design.tsx` (COLORS,
   palette, handles, inspector fields). A new template: `templates.rs` in print order; the template test checks it, and its HCL must validate.
+- Cost rule from the owner (a student): no unnecessary cost, ever. Automatic and opt-in tests only read (identity, import, plan,
+  validate); nothing applies. Templates default to the cheapest choice (t4g, Spot where safe, no public IP, gateway endpoints, one NAT).
 - Plan & Apply: never make the app apply without the shown plan, the typed name for destroys/replaces and the guards; the state file is the
   owner's (back it up, never delete it); the project's `tofu/` folder is program output and may be regenerated, except `terraform.tfstate`
   and `backups/`.

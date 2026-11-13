@@ -19,6 +19,9 @@
 //! vpce   s3_ep s3 in main                                   # a gateway endpoint (route tables route pl-s3 -> s3_ep)
 //! vpce   ssm_ep ssm in main tier private sg endpoints       # an interface endpoint in the private subnets
 //! s3     data gb 50 lifecycle ia-30                         # a bucket (public access blocked, encrypted)
+//! alb    lb internet in main tier public sg lb port 443 cert arn:aws:acm:…   # a load balancer
+//! asg    app t4g.micro in main tier private min 2 max 4 sg app               # an Auto Scaling group
+//! target lb -> app 8080                                     # the balancer sends to the group (or an instance) on that port
 //! rule   internet -> web tcp 443                            # traffic: the target lets it in from the source
 //! rule   web -> db tcp postgres
 //! ```
@@ -52,8 +55,16 @@ struct Line {
     rt: Option<String>,
     /// route table: (destination, target label)
     routes: Vec<(String, String)>,
-    /// instance: the security groups it belongs to
+    /// instance / group: the security groups it belongs to
     sgs: Vec<String>,
+}
+
+/// a `target` line: a load balancer sends to a group or an instance
+struct Target {
+    line: usize,
+    source: String,
+    target: String,
+    port: u16,
 }
 
 /// a `rule` line: traffic from one block to another
@@ -75,6 +86,7 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
     let mut d = Design::default();
     let mut lines: Vec<Line> = vec![];
     let mut rules: Vec<Rule> = vec![];
+    let mut targets: Vec<Target> = vec![];
     let mut labels: HashMap<String, usize> = HashMap::new();
     for (i, raw) in text.lines().enumerate() {
         let ln = i + 1;
@@ -83,8 +95,8 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
             continue;
         }
         let (head, tail) = match src.split_once(':') {
-            Some((h, t)) => (h.trim(), Some(t.trim())),
-            None => (src, None),
+            Some((h, t)) if src.starts_with("rt ") => (h.trim(), Some(t.trim())),
+            _ => (src, None),
         };
         let words: Vec<&str> = head.split_whitespace().collect();
         let kw = words[0];
@@ -105,6 +117,16 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                 match words.get(1).and_then(|v| v.parse::<u8>().ok()) {
                     Some(n) if (1..=6).contains(&n) && words.len() == 2 => d.azs = n,
                     _ => errors.push(err(ln, "azs: write how many Availability Zones to use, 1 to 6, such as `azs 2`")),
+                }
+                continue;
+            }
+            "target" => {
+                match words.as_slice() {
+                    [_, src, "->", dst, port] if is_label(src) && is_label(dst) => match port.parse::<u16>() {
+                        Ok(p) if p > 0 => targets.push(Target { line: ln, source: src.to_string(), target: dst.to_string(), port: p }),
+                        _ => errors.push(err(ln, format!("target: \"{port}\" is not a port"))),
+                    },
+                    _ => errors.push(err(ln, "target: `target <balancer> -> <group or instance> <port>`, such as `target lb -> app 8080`")),
                 }
                 continue;
             }
@@ -148,7 +170,7 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
         let mut i = 0;
         while i < rest.len() {
             match rest[i] {
-                "in" | "az" | "rt" | "sg" | "key" | "os" | "egress" | "tier" | "gb" | "lifecycle" | "expire" => {
+                "in" | "az" | "rt" | "sg" | "key" | "os" | "egress" | "tier" | "gb" | "lifecycle" | "expire" | "port" | "cert" | "health" | "min" | "max" | "desired" => {
                     let Some(v) = rest.get(i + 1) else {
                         errors.push(err(ln, format!("`{}` needs a value after it", rest[i])));
                         break;
@@ -157,7 +179,17 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                         "in" => l.parent = Some(v.to_string()),
                         "az" => { l.params.insert("az".into(), json!(v)); }
                         "rt" => l.rt = Some(v.to_string()),
-                        "sg" if kw == "vpce" => l.sgs = vec![v.to_string()],
+                        "sg" if kw == "vpce" || kw == "alb" => l.sgs = vec![v.to_string()],
+                        "port" => match v.parse::<u16>() {
+                            Ok(p) if p > 0 => { l.params.insert("port".into(), json!(p)); }
+                            _ => errors.push(err(ln, "port: a number, such as `port 443`")),
+                        },
+                        "cert" => { l.params.insert("cert".into(), json!(v)); }
+                        "health" => { l.params.insert("health".into(), json!(v)); }
+                        "min" | "max" | "desired" => match v.parse::<u32>() {
+                            Ok(n) => { l.params.insert(rest[i].into(), json!(n)); }
+                            _ => errors.push(err(ln, format!("{}: a number of instances", rest[i]))),
+                        },
                         "sg" => l.sgs = v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
                         "tier" => {
                             if !TIERS.contains(v) {
@@ -198,11 +230,11 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                     l.params.insert("versioning".into(), json!(true));
                     rest.remove(i);
                 }
-                "spot" if kw == "ec2" => {
+                "spot" if kw == "ec2" || kw == "asg" => {
                     l.params.insert("spot".into(), json!(true));
                     rest.remove(i);
                 }
-                "disk" if kw == "ec2" => {
+                "disk" if kw == "ec2" || kw == "asg" => {
                     match rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
                         Some(g) if (8..=16384).contains(&g) => { l.params.insert("disk".into(), json!(g)); rest.drain(i..i + 2); }
                         _ => { errors.push(err(ln, "disk: write the root volume size in GiB, 8 to 16384, such as `disk 100`")); break; }
@@ -243,6 +275,27 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                     }
                 }
                 _ => errors.push(err(ln, "ec2: `ec2 <name> <type> in <subnet> [sg <group,group>] [key <key pair>] [public] [spot] [disk <GiB>] [os al2023|ubuntu|debian]`")),
+            },
+            "alb" => match positional.as_slice() {
+                [scheme] if *scheme == "internet" || *scheme == "internal" => {
+                    l.params.insert("scheme".into(), json!(scheme));
+                    for (k, v) in [("tier", json!("public")), ("sg", json!("")), ("port", json!(80)), ("cert", json!("")), ("health", json!("/"))] {
+                        l.params.entry(k).or_insert(v);
+                    }
+                }
+                _ => errors.push(err(ln, "alb: `alb <name> <internet|internal> in <vpc> [tier <tier>] [sg <group>] [port 80|443] [cert <ACM arn>] [health </path>]`")),
+            },
+            "asg" => match positional.as_slice() {
+                [t] => {
+                    if crate::model::instance_type(t).is_none() {
+                        errors.push(err(ln, format!("asg: \"{t}\" is not an instance type the app knows")));
+                    }
+                    l.params.insert("type".into(), json!(t));
+                    for (k, v) in [("os", json!("al2023")), ("key", json!("")), ("tier", json!("private")), ("min", json!(1)), ("max", json!(2)), ("desired", json!(1)), ("spot", json!(false)), ("disk", json!(8))] {
+                        l.params.entry(k).or_insert(v);
+                    }
+                }
+                _ => errors.push(err(ln, "asg: `asg <name> <type> in <vpc> [tier <tier>] [min n] [max n] [desired n] [sg a,b] [key <pair>] [spot] [disk <GiB>] [os x]`")),
             },
             "vpce" => match positional.as_slice() {
                 [svc] => {
@@ -329,6 +382,13 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
             }
         }
     }
+    for t in &targets {
+        for lab in [&t.source, &t.target] {
+            if !label_ok(lab) {
+                errors.push(err(t.line, format!("there is no block called \"{lab}\"")));
+            }
+        }
+    }
     if !errors.is_empty() {
         errors.sort_by_key(|e| e.line);
         return Err(errors);
@@ -366,11 +426,11 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
             fresh.push(id.clone());
         }
         d.node_mut(&id).unwrap().parent = parent;
-        if l.kind == "ec2" {
+        if l.kind == "ec2" || l.kind == "asg" {
             let sgs: Vec<String> = l.sgs.iter().map(|g| ids[g].clone()).collect();
             d.node_mut(&id).unwrap().params.insert("sgs".into(), json!(sgs));
         }
-        if l.kind == "vpce" {
+        if l.kind == "vpce" || l.kind == "alb" {
             let sg = l.sgs.first().map(|g| ids[g].clone()).unwrap_or_default();
             d.node_mut(&id).unwrap().params.insert("sg".into(), json!(sg));
         }
@@ -394,6 +454,13 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
             params.insert("dest".into(), json!(dest));
             d.edges.push(Edge { id: edge_id(old), source: src.clone(), target: tgt, kind: "route".into(), params });
         }
+    }
+    for t in &targets {
+        let (src, tgt) = (ids[&t.source].clone(), ids[&t.target].clone());
+        let old = base.and_then(|b| b.edges.iter().find(|e| e.kind == "target" && e.source == src && e.target == tgt));
+        let mut params = Params::new();
+        params.insert("port".into(), json!(t.port));
+        d.edges.push(Edge { id: edge_id(old), source: src, target: tgt, kind: "target".into(), params });
     }
     for r in &rules {
         let (src, tgt) = (ids[&r.source].clone(), ids[&r.target].clone());
@@ -456,6 +523,25 @@ pub fn print(d: &Design) -> String {
                 }
                 s
             }
+            "alb" => {
+                let mut s = format!("alb {} {}{place} tier {}", n.label, p(n, "scheme"), p(n, "tier"));
+                if !p(n, "sg").is_empty() { s.push_str(&format!(" sg {}", label(&p(n, "sg")))); }
+                if let Some(port) = n.params.get("port").and_then(|v| v.as_u64()).filter(|x| *x != 80) { s.push_str(&format!(" port {port}")); }
+                if !p(n, "cert").is_empty() { s.push_str(&format!(" cert {}", p(n, "cert"))); }
+                if !p(n, "health").is_empty() && p(n, "health") != "/" { s.push_str(&format!(" health {}", p(n, "health"))); }
+                s
+            }
+            "asg" => {
+                let sgs: Vec<String> = n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).map(label).collect()).unwrap_or_default();
+                let num = |k: &str, dflt: u64| n.params.get(k).and_then(|v| v.as_u64()).unwrap_or(dflt);
+                let mut s = format!("asg {} {}{place} tier {} min {} max {} desired {}", n.label, p(n, "type"), p(n, "tier"), num("min", 1), num("max", 2), num("desired", 1));
+                if !sgs.is_empty() { s.push_str(&format!(" sg {}", sgs.join(","))); }
+                if !p(n, "key").is_empty() { s.push_str(&format!(" key {}", p(n, "key"))); }
+                if n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false) { s.push_str(" spot"); }
+                if let Some(g) = n.params.get("disk").and_then(|v| v.as_u64()).filter(|g| *g != 8) { s.push_str(&format!(" disk {g}")); }
+                if !p(n, "os").is_empty() && p(n, "os") != "al2023" { s.push_str(&format!(" os {}", p(n, "os"))); }
+                s
+            }
             "s3" => {
                 let mut s = format!("s3 {}", n.label);
                 if let Some(g) = n.params.get("gb").and_then(|v| v.as_f64()).filter(|g| *g != 10.0) { s.push_str(&format!(" gb {g}")); }
@@ -491,7 +577,7 @@ pub fn print(d: &Design) -> String {
         out.push('\n');
         done.push(v.id.clone());
         let mut kids: Vec<&Node> = d.descendants(&v.id).iter().skip(1).filter_map(|id| d.node(id)).collect();
-        let rank = |n: &Node| match n.kind.as_str() { "igw" => 0, "subnet" => 1, "nat" => 2, "ec2" => 3, "rt" => 5, "sg" => 6, "vpce" => 7, _ => 4 };
+        let rank = |n: &Node| match n.kind.as_str() { "igw" => 0, "subnet" => 1, "nat" => 2, "ec2" => 3, "rt" => 5, "sg" => 6, "vpce" => 7, "alb" => 8, "asg" => 9, _ => 4 };
         // route tables in the order of the tiers they serve (public first), so the text reads top-down like the canvas
         let rt_rank = |n: &Node| d.edges.iter().filter(|e| e.kind == "attach" && e.target == n.id).filter_map(|e| d.node(&e.source)).map(|s| tier_rank(&p(s, "tier"))).min().unwrap_or(99);
         kids.sort_by_key(|n| (rank(n), if n.kind == "rt" { rt_rank(n) } else { tier_rank(&p(n, "tier")) }, p(n, "az"), n.label.clone()));
@@ -507,6 +593,13 @@ pub fn print(d: &Design) -> String {
         for n in loose {
             out.push_str(&line(n));
             out.push('\n');
+        }
+    }
+    let targets: Vec<&Edge> = d.edges.iter().filter(|e| e.kind == "target").collect();
+    if !targets.is_empty() {
+        out.push('\n');
+        for e in targets {
+            out.push_str(&format!("target {} -> {} {}\n", label(&e.source), label(&e.target), e.params.get("port").and_then(|v| v.as_u64()).unwrap_or(8080)));
         }
     }
     let traffic: Vec<&Edge> = d.edges.iter().filter(|e| e.kind == "traffic").collect();
@@ -543,6 +636,9 @@ pub fn help() -> Vec<(String, String)> {
         ("cidr <name> <range>".into(), "an address range outside the design, such as `cidr internet 0.0.0.0/0`".into()),
         ("vpce <name> <service> in <vpc> [tier <tier>] [sg <group>]".into(), "a VPC endpoint: s3 and dynamodb are free gateway endpoints (route `pl-s3 -> name` from a table); the rest are interface endpoints in the tier's subnets".into()),
         ("s3 <name> [gb <GB>] [versioning] [lifecycle ia-30|glacier-90|ia-30-glacier-90] [expire <days>]".into(), "a bucket with public access blocked and encryption on; gb is for the estimate".into()),
+        ("alb <name> <internet|internal> in <vpc> [tier t] [sg g] [port 80|443] [cert <ACM arn>] [health /path]".into(), "an Application Load Balancer in the tier's subnets (two AZs); HTTPS when a certificate is named".into()),
+        ("asg <name> <type> in <vpc> [tier t] [min n] [max n] [desired n] [sg a,b] [key k] [spot] [disk n] [os x]".into(), "an Auto Scaling group of instances in the tier's subnets".into()),
+        ("target <balancer> -> <group|instance> <port>".into(), "the balancer sends requests to the group or instance on that port".into()),
         ("rule <from> -> <to> <tcp|udp|icmp|all> [port|range|name]".into(), "traffic the target lets in from the source (and the source lets out)".into()),
         ("# …".into(), "a comment".into()),
     ]
@@ -621,6 +717,18 @@ mod tests {
         let has = |t: &str| e.iter().any(|x| x.message.contains(t));
         assert!(has("not an instance type") && has("no block called \"nobody\"") && has("99999") && has("rule <from> -> <to>"), "{e:?}");
         assert_eq!(e.iter().map(|x| x.line).collect::<Vec<_>>(), [3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn balancer_and_group_round_trip() {
+        let t = "region ap-south-1\nazs 2\n\nvpc main 10.0.0.0/16\nigw igw in main\nsubnet pub_a public 10.0.0.0/24 az a in main rt pub\nsubnet pub_b public 10.0.1.0/24 az b in main rt pub\nsubnet app_a private 10.0.2.0/24 az a in main\nsubnet app_b private 10.0.3.0/24 az b in main\nrt pub in main: 0.0.0.0/0 -> igw\nsg app in main\nsg lb in main\nalb web internet in main tier public sg lb port 443 cert arn:aws:acm:ap-south-1:123456789012:certificate/abc\nasg app_servers t4g.micro in main tier private min 2 max 4 desired 2 sg app spot\n\ncidr internet 0.0.0.0/0\n\ntarget web -> app_servers 8080\n\nrule internet -> lb tcp 443\nrule lb -> app tcp 8080\n";
+        let d = parse(t, None).unwrap();
+        assert_eq!(print(&d), t, "\n{}", print(&d));
+        assert_eq!(d.by_label("app_servers").unwrap().params["max"], 4);
+        assert_eq!(d.by_label("web").unwrap().params["port"], 443);
+        assert_eq!(d.edges.iter().filter(|e| e.kind == "target").count(), 1);
+        let e = parse("vpc main 10.0.0.0/16\nalb x sideways in main\ntarget x -> nobody 80\n", None).unwrap_err();
+        assert!(e.iter().any(|x| x.message.contains("internet|internal")) && e.iter().any(|x| x.message.contains("nobody")), "{e:?}");
     }
 
     #[test]

@@ -8,8 +8,8 @@ Terraform shows the whole text but not the picture, and mistakes appear only at 
 wrong CIDR, a private subnet with no way out, or a NAT Gateway in the wrong subnet at design time, on the block itself, in plain
 words, with what to change.
 
-**Version 0.4.0: networking, security groups and instances on the canvas and in text; OpenTofu/Terraform code; Plan & Apply from the app;
-costs; a read-only look at your account; neon night mode.** The app itself only reads from AWS; resources are created only when you press
+**Version 0.5.0: networking, security groups, instances, Spot, VPC endpoints, S3, load balancers and Auto Scaling on the canvas and in
+text; OpenTofu/Terraform code; Plan & Apply from the app; costs; a read-only look at your account; neon night mode.** The app itself only reads from AWS; resources are created only when you press
 Apply after seeing the plan, and the Costs tab tells you beforehand what they cost a month.
 
 ## What it does now
@@ -68,8 +68,13 @@ Apply after seeing the plan, and the Costs tab tells you beforehand what they co
 - **Account → Import:** list the VPCs in a region and bring one onto the canvas: its subnets in their AZs, tiers worked out from the routes,
   NAT Gateways in their subnets, route tables with their routes, security groups with their rules as arrows, instances in their subnets,
   and the monthly cost it already incurs. Read-only; the project remembers which account and region it came from.
-- **Templates:** a single public subnet, one web server (the cheapest thing that serves a website), a two-tier VPC in 2 AZs, a three-tier
-  VPC with a shared NAT, and "Spot the mistakes".
+- **Spot, endpoints, S3, balancers, scaling:** instances and scaling groups can be Spot (about 70 % cheaper; the group replaces
+  interrupted ones); VPC endpoints for S3/DynamoDB are free and let isolated subnets reach them without a NAT, interface endpoints
+  (SSM, ECR, …) are priced per AZ; S3 buckets always have public access blocked and encryption on, with lifecycle rules to cheaper
+  storage; an Application Load Balancer (two AZs checked, HTTPS with an ACM certificate) sends to an Auto Scaling group or an instance.
+- **Templates:** a single public subnet, one web server (the cheapest thing that serves a website), a two-tier web app in 2 AZs (ALB +
+  Spot Auto Scaling group), a three-tier VPC with a shared NAT and an S3 endpoint, the NN Builder GPU box (g4dn.xlarge Spot), and "Spot
+  the mistakes".
 - **Night mode** (⇧⌘N) is neon: dark panels, glowing outlines, each kind of block in its own colour.
 - **Projects:** a folder with `project.json` and `design.json`, wherever you choose. A template opens unsaved until you save it.
 
@@ -80,7 +85,7 @@ Apply after seeing the plan, and the Costs tab tells you beforehand what they co
 | 0 (done) | canvas, CIDR and routing checks, `.aib` text, templates; plus credentials, costs and VPC import pulled forward |
 | 1 (done) | security groups as traffic arrows, EC2, Terraform/OpenTofu HCL generation, `tofu validate` in CI |
 | 2 (done) | plan / apply / destroy with OpenTofu, the plan drawn on the canvas, state backups, account and budget guards |
-| 3 | ALB, Auto Scaling, RDS, S3, VPC endpoints; reachability questions; cost estimates |
+| 3 (mostly done) | ALB, Auto Scaling, S3, VPC endpoints, Spot (done); RDS and reachability questions (next) |
 | 4 | drift check, least-privilege deploy policy generated from the design, budget guard |
 
 ## Build

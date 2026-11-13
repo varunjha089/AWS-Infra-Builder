@@ -282,11 +282,11 @@ mod tests {
         let d = crate::templates::build("two_tier").unwrap();
         let dr = create_draft("Two-tier VPC", d).unwrap();
         assert!(dr.is_draft());
-        assert_eq!(dr.design().nodes.len(), 14);
+        assert_eq!(dr.design().nodes.len(), 16);
         assert_eq!(last_project().unwrap().dir, draft_dir());
         let saved = save_as(&dr, "Saved net", Some(&projects)).unwrap();
         assert!(!saved.is_draft() && !draft_dir().exists());
-        assert_eq!(saved.design().nodes.len(), 14);
+        assert_eq!(saved.design().nodes.len(), 16);
         assert_eq!(listing().len(), 2);
         assert!(save_as(&saved, "again", Some(&projects)).is_err());
 

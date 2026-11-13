@@ -89,6 +89,8 @@ pub const KINDS: &[(&str, &str, &str)] = &[
     ("cidr", "Address range", ""),
     ("vpce", "VPC endpoint", "vpc"),
     ("s3", "S3 bucket", ""),
+    ("alb", "Load balancer", "vpc"),
+    ("asg", "Auto Scaling group", "vpc"),
 ];
 
 /// (service, title, "gateway" | "interface"): gateway endpoints are free and route through the route table; interface endpoints
@@ -205,6 +207,10 @@ pub fn defaults(kind: &str) -> Params {
         "vpce" => json!({"service": "s3", "tier": "private", "sg": ""}),
         // public access blocked and encryption on always; `gb` is only for the estimate; lifecycle moves old objects to cheaper storage
         "s3" => json!({"versioning": false, "lifecycle": "none", "expire_days": 0, "gb": 10}),
+        // an internet-facing ALB in the public subnets; HTTP on 80 until a certificate (ACM ARN) is named, then HTTPS on 443
+        "alb" => json!({"scheme": "internet", "tier": "public", "sg": "", "port": 80, "cert": "", "health": "/"}),
+        // the cheapest type, two instances in the private subnets, scaling to four
+        "asg" => json!({"type": "t4g.micro", "os": "al2023", "key": "", "tier": "private", "min": 1, "max": 2, "desired": 1, "sgs": [], "spot": false, "disk": 8}),
         _ => json!({}),
     };
     v.as_object().cloned().unwrap_or_default()
@@ -221,6 +227,7 @@ pub fn edge_kind(source: &str, target: &str) -> Option<&'static str> {
         ("subnet", "rt") => Some("attach"),
         ("rt", "igw") | ("rt", "nat") | ("rt", "vpce") => Some("route"),
         ("sg", "sg") | ("sg", "cidr") | ("cidr", "sg") => Some("traffic"),
+        ("alb", "asg") | ("alb", "ec2") => Some("target"),
         _ => None,
     }
 }
@@ -417,6 +424,8 @@ impl Design {
             "route" if target_kind == "vpce" => json!({"dest": format!("pl-{}", self.param_str(target, "service"))}).as_object().cloned().unwrap_or_default(),
             "route" => json!({"dest": "0.0.0.0/0"}).as_object().cloned().unwrap_or_default(),
             "traffic" => json!({"proto": "tcp", "ports": "443"}).as_object().cloned().unwrap_or_default(),
+            // the port the targets listen on
+            "target" => json!({"port": 8080}).as_object().cloned().unwrap_or_default(),
             _ => Params::new(),
         };
         self.edges.push(Edge { id: id.clone(), source: source.into(), target: target.into(), kind: kind.into(), params });

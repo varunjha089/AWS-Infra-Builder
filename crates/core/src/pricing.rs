@@ -50,6 +50,11 @@ pub const SPOT_FACTOR: f64 = 0.3;
 /// an interface endpoint's network interface, per hour per AZ (plus USD 0.01 per GB)
 pub const INTERFACE_ENDPOINT_HOURLY: f64 = 0.01;
 
+/// an Application Load Balancer per hour, before capacity units
+pub fn alb_hourly(region: &str) -> f64 {
+    match region { "us-east-1" | "us-east-2" | "us-west-2" => 0.0225, "ap-south-1" => 0.0239, "eu-west-1" => 0.0252, _ => 0.025 }
+}
+
 /// a bucket's storage a month from its expected GB and lifecycle (Standard 0.023, Infrequent Access 0.0125, Glacier Instant 0.004 per GB)
 pub fn s3_monthly(n: &crate::model::Node) -> f64 {
     let gb = n.params.get("gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -131,6 +136,35 @@ pub fn cost(d: &Design) -> CostReport {
                 let monthly = azs as f64 * INTERFACE_ENDPOINT_HOURLY * HOURS;
                 items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
                     note: format!("{svc} interface endpoint: {azs} interface{} × {INTERFACE_ENDPOINT_HOURLY} USD/h × {HOURS:.0} h = {}, plus USD 0.01 per GB", if azs == 1 { "" } else { "s" }, money(monthly)) });
+            }
+        }
+        if n.kind == "alb" {
+            let monthly = alb_hourly(&region) * HOURS;
+            items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
+                note: format!("{} USD/h × {HOURS:.0} h = {} a month idle, plus capacity units (about USD 6 per LCU-month; a small site uses one)", alb_hourly(&region), money(monthly)) });
+            let targets = d.edges.iter().filter(|e| e.kind == "target" && e.source == n.id).count();
+            let one_instance = d.edges.iter().filter(|e| e.kind == "target" && e.source == n.id).all(|e| d.node(&e.target).map(|t| t.kind == "ec2").unwrap_or(false));
+            if targets <= 1 && one_instance {
+                advice.push(format!("{} fronts a single instance: a load balancer costs {} a month idle. For one server, a public address (USD 3.65) and its security group do the job; a balancer pays off with several servers or an Auto Scaling group.", n.label, money(monthly)));
+            }
+        }
+        if n.kind == "asg" {
+            let t = n.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let spot = n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
+            let desired = n.params.get("desired").and_then(|v| v.as_f64()).unwrap_or(1.0);
+            let disk = n.params.get("disk").and_then(|v| v.as_f64()).unwrap_or(8.0);
+            let h = instance_hourly(t, &region) * if spot { SPOT_FACTOR } else { 1.0 };
+            let monthly = desired * (h * HOURS + disk * GP3_PER_GIB);
+            items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,
+                note: format!("{desired:.0} × {t}{}: {h:.4} USD/h × {HOURS:.0} h + {disk:.0} GiB each = {} a month at the desired size (more when it scales out)", if spot { " spot" } else { "" }, money(monthly)) });
+            if !spot && desired >= 2.0 {
+                advice.push(format!("{}: instances in an Auto Scaling group behind a balancer are replaceable, so Spot is safe there and saves about {} a month.", n.label, money(monthly * (1.0 - SPOT_FACTOR))));
+            }
+            if let Some(arm) = arm_equivalent(t) {
+                let save = (instance_hourly(t, &region) - instance_hourly(arm, &region)) * HOURS * desired * if spot { SPOT_FACTOR } else { 1.0 };
+                if save > 0.0 {
+                    x86.push((n.label.clone(), arm, save));
+                }
             }
         }
         if n.kind == "s3" {
@@ -227,10 +261,11 @@ mod tests {
     fn two_tier_costs_two_nats_and_advises_one() {
         let d = templates::build("two_tier").unwrap();
         let c = cost(&d);
-        assert_eq!(c.items.len(), 2);
-        assert!((c.total - 2.0 * 0.056 * 730.0).abs() < 0.01, "{}", c.total);
+        assert_eq!(c.items.len(), 4, "two NATs, the balancer, the group");
+        let nats: f64 = c.items.iter().filter(|i| i.kind == "nat").map(|i| i.monthly).sum();
+        assert!((nats - 2.0 * 0.056 * 730.0).abs() < 0.01, "{nats}");
         assert!(c.advice[0].contains("saves USD 40.88"), "{}", c.advice[0]);
-        assert!(c.items[0].note.contains("0.056 USD/h × 730 h"));
+        assert!(c.items.iter().find(|i| i.kind == "nat").unwrap().note.contains("0.056 USD/h × 730 h"));
         let three = cost(&templates::build("three_tier").unwrap());
         assert_eq!(three.items.len(), 1);
         assert!(!three.advice.iter().any(|a| a.contains("One shared NAT")));

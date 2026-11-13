@@ -600,6 +600,8 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &item("add-cidr", "Add Address range", None)?,
         &item("add-vpce", "Add VPC endpoint", None)?,
         &item("add-s3", "Add S3 bucket", None)?,
+        &item("add-alb", "Add Load balancer", None)?,
+        &item("add-asg", "Add Auto Scaling group", None)?,
     ])?;
     menu.append_items(&[&file, &edit, &view, &design])?;
     Ok(menu)

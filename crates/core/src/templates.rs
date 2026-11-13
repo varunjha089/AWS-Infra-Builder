@@ -28,13 +28,14 @@ rule internet -> web tcp 443\nrule internet -> web tcp 80\nrule office -> web tc
     },
     Template {
         key: "two_tier",
-        title: "Two-tier VPC (2 AZs)",
-        about: "Public and private subnets in two Availability Zones, one NAT Gateway per AZ (no single point of failure; about USD 64 a month idle). The network of a load balancer in front of application servers.",
+        title: "Two-tier web app (2 AZs)",
+        about: "A load balancer in two public subnets in front of an Auto Scaling group of two Spot t4g.micro in private subnets, one NAT Gateway per AZ (no single point of failure). HTTP until you name an ACM certificate. The Costs tab shows where the money goes (the NATs) and the cheaper choices.",
         text: "net \"Two-tier VPC\"\nregion ap-south-1\nazs 2\n\nvpc main 10.0.0.0/16\nigw igw in main\n\
 subnet public_a public 10.0.0.0/20 az a in main rt public\nsubnet public_b public 10.0.16.0/20 az b in main rt public\n\
 subnet app_a private 10.0.32.0/20 az a in main rt app_a_rt\nsubnet app_b private 10.0.48.0/20 az b in main rt app_b_rt\n\
 nat nat_a in public_a\nnat nat_b in public_b\n\
-rt public in main: 0.0.0.0/0 -> igw\nrt app_a_rt in main: 0.0.0.0/0 -> nat_a\nrt app_b_rt in main: 0.0.0.0/0 -> nat_b\nsg app in main\nsg web in main\n\ncidr internet 0.0.0.0/0\n\nrule internet -> web tcp 443\nrule web -> app tcp 8080\n",
+rt public in main: 0.0.0.0/0 -> igw\nrt app_a_rt in main: 0.0.0.0/0 -> nat_a\nrt app_b_rt in main: 0.0.0.0/0 -> nat_b\nsg app in main\nsg web in main\n\
+alb lb internet in main tier public sg web\nasg app_servers t4g.micro in main tier private min 2 max 4 desired 2 sg app spot\n\ncidr internet 0.0.0.0/0\n\ntarget lb -> app_servers 8080\n\nrule internet -> web tcp 80\nrule web -> app tcp 8080\n",
     },
     Template {
         key: "three_tier",
@@ -96,7 +97,8 @@ mod tests {
                 assert_eq!(a.warnings, 1, "{:?}", a.problems);
                 assert!(a.problems[0].contains("is in AZ a"));
             } else if t.key == "two_tier" {
-                assert!(a.problems.iter().all(|p| p.contains("No instance uses")), "{:?}", a.problems);
+                assert_eq!(a.warnings, 0, "{:?}", a.problems);
+                assert!(a.cost.items.iter().any(|i| i.kind == "alb") && a.cost.items.iter().any(|i| i.kind == "asg"));
             } else if t.key == "gpu_box" {
                 assert_eq!(a.warnings, 0, "{:?}", a.problems);
                 let gpu = a.nodes.iter().find(|n| n.summary.starts_with("g4dn.xlarge spot")).expect("spot in the summary");

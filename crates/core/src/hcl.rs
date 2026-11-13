@@ -65,7 +65,7 @@ pub fn generate(d: &Design) -> Files {
 
     // AMIs: one data source per OS × architecture in use
     let mut amis: BTreeMap<String, (String, String)> = BTreeMap::new();
-    for n in d.nodes.iter().filter(|n| n.kind == "ec2") {
+    for n in d.nodes.iter().filter(|n| n.kind == "ec2" || n.kind == "asg") {
         let arch = instance_type(p(n, "type")).map(|t| t.3).unwrap_or("x86_64");
         let (name, owner, pattern) = ami_for(p(n, "os"), arch);
         amis.insert(name, (owner, pattern));
@@ -136,6 +136,42 @@ pub fn generate(d: &Design) -> Files {
                 m.push_str(&format!("\n# interface endpoint {} for {} (one interface per {tier} subnet, USD 0.01/h each)\nresource \"aws_vpc_endpoint\" \"{}\" {{\n  vpc_id              = aws_vpc.{}.id\n  service_name        = \"com.amazonaws.${{var.region}}.{svc}\"\n  vpc_endpoint_type   = \"Interface\"\n  subnet_ids          = [{}]\n{sg}  private_dns_enabled = true\n{}}}\n", ep.label, svc, ep.label, v.label, subs.join(", "), tags(ep, &[])));
             }
         }
+        for g in kids.iter().filter(|n| n.kind == "asg") {
+            let t = p(g, "type");
+            let arch = instance_type(t).map(|x| x.3).unwrap_or("x86_64");
+            let (ami, _, _) = ami_for(p(g, "os"), arch);
+            let subs: Vec<String> = kids.iter().filter(|n| n.kind == "subnet" && p(n, "tier") == p(g, "tier")).map(|s| format!("aws_subnet.{}.id", s.label)).collect();
+            let sgs: Vec<String> = g.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).filter(|id| d.node(id).is_some()).map(|id| format!("aws_security_group.{}.id", label(id))).collect()).unwrap_or_default();
+            let spot = g.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
+            let disk = g.params.get("disk").and_then(|v| v.as_u64()).unwrap_or(8);
+            let num = |k: &str, dflt: u64| g.params.get(k).and_then(|v| v.as_u64()).unwrap_or(dflt);
+            let tgs: Vec<String> = d.edges.iter().filter(|e| e.kind == "target" && e.target == g.id).filter_map(|e| d.node(&e.source)).map(|lb| format!("aws_lb_target_group.{}.arn", lb.label)).collect();
+            m.push_str(&format!("\n# Auto Scaling group {} ({t}{}, {}–{} instances, desired {})\nresource \"aws_launch_template\" \"{}\" {{\n  name_prefix   = \"${{var.project}}-{}-\"\n  image_id      = data.aws_ami.{ami}.id\n  instance_type = {}\n{}  vpc_security_group_ids = [{}]\n{}  block_device_mappings {{\n    device_name = \"/dev/xvda\"\n    ebs {{\n      volume_type = \"gp3\"\n      volume_size = {disk}\n    }}\n  }}\n  metadata_options {{\n    http_tokens = \"required\"\n  }}\n  tag_specifications {{\n    resource_type = \"instance\"\n    tags = {{ Name = \"${{var.project}}-{}\", \"design-block\" = {} }}\n  }}\n}}\n\nresource \"aws_autoscaling_group\" \"{}\" {{\n  name                = \"${{var.project}}-{}\"\n  min_size            = {}\n  max_size            = {}\n  desired_capacity    = {}\n  vpc_zone_identifier = [{}]\n{}  launch_template {{\n    id      = aws_launch_template.{}.id\n    version = \"$Latest\"\n  }}\n  tag {{\n    key                 = \"design-block\"\n    value               = {}\n    propagate_at_launch = false\n  }}\n}}\n",
+                g.label, if spot { ", spot" } else { "" }, num("min", 1), num("max", 2), num("desired", 1), g.label, g.label, q(t),
+                if p(g, "key").trim().is_empty() { String::new() } else { "  key_name      = var.key_name\n".to_string() }, sgs.join(", "),
+                if spot { "  instance_market_options {\n    market_type = \"spot\"\n  }\n".to_string() } else { String::new() }, g.label, q(&g.label),
+                g.label, g.label, num("min", 1), num("max", 2), num("desired", 1), subs.join(", "),
+                if tgs.is_empty() { String::new() } else { format!("  target_group_arns   = [{}]\n  health_check_type   = \"ELB\"\n", tgs.join(", ")) }, g.label, q(&g.label)));
+        }
+        for lb in kids.iter().filter(|n| n.kind == "alb") {
+            let subs: Vec<String> = kids.iter().filter(|n| n.kind == "subnet" && p(n, "tier") == p(lb, "tier")).map(|s| format!("aws_subnet.{}.id", s.label)).collect();
+            let sg = d.node(p(lb, "sg")).map(|g| format!("aws_security_group.{}.id", g.label));
+            let port = lb.params.get("port").and_then(|v| v.as_u64()).unwrap_or(80);
+            let cert = p(lb, "cert").trim();
+            let targets: Vec<(&crate::model::Edge, &Node)> = d.edges.iter().filter(|e| e.kind == "target" && e.source == lb.id).filter_map(|e| Some((e, d.node(&e.target)?))).collect();
+            let tport = targets.first().map(|(e, _)| e.params.get("port").and_then(|v| v.as_u64()).unwrap_or(8080)).unwrap_or(8080);
+            m.push_str(&format!("\n# load balancer {} ({}, about USD {:.0} a month idle + LCU)\nresource \"aws_lb\" \"{}\" {{\n  name               = substr(\"${{var.project}}-{}\", 0, 32)\n  load_balancer_type = \"application\"\n  internal           = {}\n  subnets            = [{}]\n{}{}}}\n\nresource \"aws_lb_target_group\" \"{}\" {{\n  name     = substr(\"${{var.project}}-{}\", 0, 32)\n  port     = {tport}\n  protocol = \"HTTP\"\n  vpc_id   = aws_vpc.{}.id\n  health_check {{\n    path = {}\n  }}\n{}}}\n",
+                lb.label, p(lb, "scheme"), crate::pricing::alb_hourly(&d.region) * crate::pricing::HOURS, lb.label, lb.label.replace('_', "-"), p(lb, "scheme") == "internal", subs.join(", "),
+                sg.map(|s| format!("  security_groups    = [{s}]\n")).unwrap_or_default(), tags(lb, &[]), lb.label, lb.label.replace('_', "-"), v.label, q(if p(lb, "health").is_empty() { "/" } else { p(lb, "health") }), tags(lb, &[])));
+            if cert.is_empty() {
+                m.push_str(&format!("\nresource \"aws_lb_listener\" \"{}\" {{\n  load_balancer_arn = aws_lb.{}.arn\n  port              = {port}\n  protocol          = \"HTTP\"\n  default_action {{\n    type             = \"forward\"\n    target_group_arn = aws_lb_target_group.{}.arn\n  }}\n}}\n", lb.label, lb.label, lb.label));
+            } else {
+                m.push_str(&format!("\nresource \"aws_lb_listener\" \"{}\" {{\n  load_balancer_arn = aws_lb.{}.arn\n  port              = {port}\n  protocol          = \"HTTPS\"\n  ssl_policy        = \"ELBSecurityPolicy-TLS13-1-2-2021-06\"\n  certificate_arn   = {}\n  default_action {{\n    type             = \"forward\"\n    target_group_arn = aws_lb_target_group.{}.arn\n  }}\n}}\n\n# plain HTTP is sent to HTTPS\nresource \"aws_lb_listener\" \"{}_http\" {{\n  load_balancer_arn = aws_lb.{}.arn\n  port              = 80\n  protocol          = \"HTTP\"\n  default_action {{\n    type = \"redirect\"\n    redirect {{\n      port        = \"443\"\n      protocol    = \"HTTPS\"\n      status_code = \"HTTP_301\"\n    }}\n  }}\n}}\n", lb.label, lb.label, q(cert), lb.label, lb.label, lb.label));
+            }
+            for (e, t) in targets.iter().filter(|(_, t)| t.kind == "ec2") {
+                m.push_str(&format!("\nresource \"aws_lb_target_group_attachment\" \"{}_{}\" {{\n  target_group_arn = aws_lb_target_group.{}.arn\n  target_id        = aws_instance.{}.id\n  port             = {}\n}}\n", lb.label, t.label, lb.label, t.label, e.params.get("port").and_then(|v| v.as_u64()).unwrap_or(8080)));
+            }
+        }
         for n in kids.iter().filter(|n| n.kind == "ec2") {
             let t = p(n, "type");
             let arch = instance_type(t).map(|x| x.3).unwrap_or("x86_64");
@@ -180,7 +216,7 @@ pub fn generate(d: &Design) -> Files {
     v.push_str("# variables.tf: generated by AWS Infra Builder\n\n");
     v.push_str(&format!("variable \"region\" {{\n  description = \"the AWS region of the design\"\n  type        = string\n  default     = {}\n}}\n\n", q(&d.region)));
     v.push_str(&format!("variable \"project\" {{\n  description = \"the project tag and the prefix of every Name\"\n  type        = string\n  default     = {}\n}}\n", q(&project)));
-    let keys: Vec<&str> = d.nodes.iter().filter(|n| n.kind == "ec2").map(|n| p(n, "key").trim()).filter(|k| !k.is_empty()).collect();
+    let keys: Vec<&str> = d.nodes.iter().filter(|n| n.kind == "ec2" || n.kind == "asg").map(|n| p(n, "key").trim()).filter(|k| !k.is_empty()).collect();
     if let Some(k) = keys.first() {
         v.push_str(&format!("\nvariable \"key_name\" {{\n  description = \"the name of an existing EC2 key pair in the region, for SSH\"\n  type        = string\n  default     = {}\n}}\n", q(k)));
     }
@@ -201,6 +237,9 @@ pub fn generate(d: &Design) -> Files {
     }
     for n in d.nodes.iter().filter(|n| n.kind == "nat") {
         o.push_str(&format!("\noutput \"nat_{}_public_ip\" {{\n  value = aws_eip.{}.public_ip\n}}\n", n.label, n.label));
+    }
+    for lb in d.nodes.iter().filter(|n| n.kind == "alb") {
+        o.push_str(&format!("\noutput \"{}_dns_name\" {{\n  value = aws_lb.{}.dns_name\n}}\n", lb.label, lb.label));
     }
     for b in d.nodes.iter().filter(|n| n.kind == "s3") {
         o.push_str(&format!("\noutput \"bucket_{}\" {{\n  value = aws_s3_bucket.{}.bucket\n}}\n", b.label, b.label));

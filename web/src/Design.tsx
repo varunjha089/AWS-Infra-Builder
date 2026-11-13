@@ -10,7 +10,7 @@ import { api, errText, type Analysis, type AppState, type DNode, type Design, ty
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
 import { neon, useTheme } from "./theme";
 
-export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569", vpce: "#0f766e", s3: "#15803d" };
+export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569", vpce: "#0f766e", s3: "#15803d", alb: "#9333ea", asg: "#a16207" };
 const CONTAINER = (kind: string) => kind === "vpc" || kind === "subnet";
 
 type Data = { node: DNode; result?: NodeResult; azName: string; plan?: string; mark?: string };
@@ -51,13 +51,14 @@ function BlockNode({ data, selected }: NodeProps<Node<Data>>) {
   const st = r?.status ?? "ok";
   return (
     <div className={`block st-${st} ${selected ? "sel" : ""}`} style={{ "--c": color(n) } as CSSProperties}>
-      {(n.kind === "rt" || n.kind === "sg" || n.kind === "cidr") && <Handle type="target" position={Position.Left} />}
+      {(n.kind === "rt" || n.kind === "sg" || n.kind === "cidr" || n.kind === "asg" || n.kind === "ec2") && <Handle type="target" position={Position.Left} />}
       {(n.kind === "igw" || n.kind === "nat" || n.kind === "vpce") && <Handle type="target" position={Position.Top} />}
       {(data.plan || data.mark) && <span className={`ribbon act-${data.mark ?? data.plan}`}>{data.mark ?? data.plan}</span>}
       <div className="lh"><span>{r?.title ?? n.kind}{mark(st)}</span><span className="bl">{n.label}</span></div>
       <div className={`ls st-${st}`}>{st !== "ok" ? r?.messages[0] : r?.summary || ""}{n.params.aws_id ? <span className="awsid"> · {String(n.params.aws_id)}</span> : null}</div>
       {n.kind === "rt" && <Handle type="source" position={Position.Right} title="drag to a gateway" />}
       {(n.kind === "sg" || n.kind === "cidr") && <Handle type="source" position={Position.Right} title="drag to a security group or an address range: traffic" />}
+      {n.kind === "alb" && <Handle type="source" position={Position.Right} title="drag to an Auto Scaling group or an instance: the target" />}
     </div>
   );
 }
@@ -248,6 +249,8 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
         <button className="pal" style={pal("s3")} onClick={() => add("s3")}>S3 bucket<small>public access blocked, encrypted</small></button>
         <h4>Compute</h4>
         <button className="pal" style={pal("ec2")} onClick={() => add("ec2")}>EC2 instance<small>cheapest type by default, no public IP</small></button>
+        <button className="pal" style={pal("asg")} onClick={() => add("asg")}>Auto Scaling group<small>instances in a tier; Spot is safe here</small></button>
+        <button className="pal" style={pal("alb")} onClick={() => add("alb")}>Load balancer<small>two AZs; ≈ USD 17/month idle</small></button>
         <h4>Arrows</h4>
         <p className="small muted" style={{ margin: "4px 0" }}>Subnet → route table: the subnet uses it. Route table → gateway: a route. Group or range → group: the target lets that traffic in (ports in the inspector).</p>
         <h4>Layout</h4>
@@ -298,6 +301,33 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
                     <div className="small muted">USD 0.01 an hour per subnet of the tier, plus USD 0.01 per GB; still far cheaper than a NAT Gateway for a few services.</div>
                   </>}
               </>}
+              {selected.kind === "alb" && <>
+                <label>Scheme<select value={String(selected.params.scheme ?? "internet")} onChange={(e) => setParam(selected.id, "scheme", e.target.value, false)}><option value="internet">internet-facing</option><option value="internal">internal (VPC only)</option></select></label>
+                <label>Tier (its subnets, two AZs needed)<select value={String(selected.params.tier ?? "public")} onChange={(e) => setParam(selected.id, "tier", e.target.value, false)}>{st.tiers.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
+                <label>Security group (must let the port in)<select value={String(selected.params.sg ?? "")} onChange={(e) => setParam(selected.id, "sg", e.target.value, false)}>
+                  <option value="">none</option>{design.nodes.filter((n) => n.kind === "sg" && n.parent === selected.parent).map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}</select></label>
+                <label>Port<select value={Number(selected.params.port ?? 80)} onChange={(e) => setParam(selected.id, "port", Number(e.target.value), false)}><option value={80}>80 (HTTP)</option><option value={443}>443 (HTTPS, needs a certificate)</option></select></label>
+                <label>ACM certificate ARN (for HTTPS)<input value={String(selected.params.cert ?? "")} onChange={(e) => setParam(selected.id, "cert", e.target.value)} placeholder="arn:aws:acm:…" /></label>
+                <label>Health check path<input value={String(selected.params.health ?? "/")} onChange={(e) => setParam(selected.id, "health", e.target.value)} /></label>
+                <div className="small muted">Draw an arrow from the balancer to an Auto Scaling group or an instance; the arrow's port is where the targets listen.</div>
+              </>}
+              {selected.kind === "asg" && <>
+                <label>Instance type<select value={String(selected.params.type ?? "t4g.micro")} onChange={(e) => setParam(selected.id, "type", e.target.value, false)}>
+                  {st.instance_types.map((t) => { const h = design.region === "us-east-1" ? t.us_east_1 : design.region === "ap-south-1" ? t.ap_south_1 : t.us_east_1 * 1.1; return <option key={t.type} value={t.type}>{t.type} · {t.vcpu} vCPU · {t.memory} GiB · USD {(h * 730).toFixed(0)}/month each</option>; })}</select></label>
+                <label>Tier (its subnets)<select value={String(selected.params.tier ?? "private")} onChange={(e) => setParam(selected.id, "tier", e.target.value, false)}>{st.tiers.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
+                <div className="row" style={{ margin: 0 }}>
+                  <label>Min<input type="number" min={0} style={{ width: 70 }} value={Number(selected.params.min ?? 1)} onChange={(e) => setParam(selected.id, "min", Math.max(0, Number(e.target.value) || 0))} /></label>
+                  <label>Desired<input type="number" min={0} style={{ width: 70 }} value={Number(selected.params.desired ?? 1)} onChange={(e) => setParam(selected.id, "desired", Math.max(0, Number(e.target.value) || 0))} /></label>
+                  <label>Max<input type="number" min={1} style={{ width: 70 }} value={Number(selected.params.max ?? 2)} onChange={(e) => setParam(selected.id, "max", Math.max(1, Number(e.target.value) || 1))} /></label>
+                </div>
+                <label>Operating system<select value={String(selected.params.os ?? "al2023")} onChange={(e) => setParam(selected.id, "os", e.target.value, false)}>{st.os.map((o) => <option key={o.key} value={o.key}>{o.title}</option>)}</select></label>
+                <label>Key pair (empty = none)<input value={String(selected.params.key ?? "")} onChange={(e) => setParam(selected.id, "key", e.target.value)} /></label>
+                <label className="inline"><input type="checkbox" checked={!!selected.params.spot} onChange={(e) => setParam(selected.id, "spot", e.target.checked, false)} />Spot (about 70 % cheaper; the group replaces interrupted instances)</label>
+                <label>Root volume (GiB)<input type="number" min={8} value={Number(selected.params.disk ?? 8)} onChange={(e) => setParam(selected.id, "disk", Math.max(8, Number(e.target.value) || 8))} /></label>
+                <div>Security groups{design.nodes.filter((n) => n.kind === "sg" && n.parent === selected.parent).map((g) => {
+                  const cur = Array.isArray(selected.params.sgs) ? (selected.params.sgs as string[]) : [];
+                  return <label key={g.id} className="inline"><input type="checkbox" checked={cur.includes(g.id)} onChange={(e) => setParam(selected.id, "sgs", e.target.checked ? [...cur, g.id] : cur.filter((x) => x !== g.id), false)} />{g.label}</label>; })}</div>
+              </>}
               {selected.kind === "s3" && <>
                 <label>Expected storage (GB, for the estimate)<input type="number" min={0} value={Number(selected.params.gb ?? 10)} onChange={(e) => setParam(selected.id, "gb", Math.max(0, Number(e.target.value) || 0))} /></label>
                 <label>Lifecycle (older objects to cheaper storage)<select value={String(selected.params.lifecycle ?? "none")} onChange={(e) => setParam(selected.id, "lifecycle", e.target.value, false)}>
@@ -336,11 +366,13 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
           </>
         ) : edge && edgeResult ? (
           <>
-            <h3>{edge.kind === "route" ? "Route" : edge.kind === "traffic" ? "Traffic rule" : "Attachment"}</h3>
+            <h3>{edge.kind === "route" ? "Route" : edge.kind === "traffic" ? "Traffic rule" : edge.kind === "target" ? "Target" : "Attachment"}</h3>
             <p className="small">{design.nodes.find((n) => n.id === edge.source)?.label} → {design.nodes.find((n) => n.id === edge.target)?.label}</p>
             {edge.kind === "route" && <div className="fields"><label>Destination<input value={String(edge.params.dest ?? "")} onChange={(e) => setEdgeDest(edge.id, e.target.value)} placeholder="0.0.0.0/0" /></label>
               <div className="small muted">0.0.0.0/0 = everything not inside the VPC (the internet)</div></div>}
             {edge.kind === "attach" && <p className="small muted">The subnet uses this route table. A subnet uses one table; a table can serve many subnets.</p>}
+            {edge.kind === "target" && <div className="fields"><label>Port the targets listen on<input type="number" min={1} max={65535} value={Number(edge.params.port ?? 8080)} onChange={(e) => change({ ...design, edges: design.edges.map((x) => (x.id === edge.id ? { ...x, params: { ...x.params, port: Math.max(1, Number(e.target.value) || 1) } } : x)) }, true)} /></label>
+              <div className="small muted">The target's security group must let this port in from the balancer's group (a traffic arrow between the two groups).</div></div>}
             {edge.kind === "traffic" && <div className="fields">
               <label>Protocol<select value={String(edge.params.proto ?? "tcp")} onChange={(e) => change({ ...design, edges: design.edges.map((x) => (x.id === edge.id ? { ...x, params: { ...x.params, proto: e.target.value } } : x)) })}>
                 <option value="tcp">tcp</option><option value="udp">udp</option><option value="icmp">icmp (ping)</option><option value="all">all traffic</option></select></label>
