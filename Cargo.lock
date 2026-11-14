@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aib-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -147,13 +147,15 @@ dependencies = [
 
 [[package]]
 name = "aws-infra-builder-app"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "aib-core",
  "anyhow",
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-autoscaling",
  "aws-sdk-ec2",
+ "aws-sdk-elasticloadbalancingv2",
  "aws-sdk-sts",
  "base64 0.22.1",
  "chrono",
@@ -219,10 +221,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-autoscaling"
+version = "1.144.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a08cb197f98dad7b1a3d4e7fcc94fbc13a66c2ea5465ba57fdb5dd00f865d6e8"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-ec2"
 version = "1.278.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a50298d2834a014a1eb4fb3557e4b3df769189efc8c4a85d7d5dbe8d9c5db932"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
+name = "aws-sdk-elasticloadbalancingv2"
+version = "1.136.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3cd914889714ea6496f5b4142ed4bb59b1e1a882106fc9b818cbc4cbc41bf02"
 dependencies = [
  "arc-swap",
  "aws-credential-types",

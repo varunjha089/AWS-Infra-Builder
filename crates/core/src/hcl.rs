@@ -170,6 +170,9 @@ pub fn generate_with(d: &Design, managed: &std::collections::HashSet<String>) ->
                 m.push_str(&format!("\n# {}: everything out (AWS's default; the provider removes it unless it is written down)\nresource \"aws_vpc_security_group_egress_rule\" \"{}_out_all\" {{\n  security_group_id = {gref}.id\n  ip_protocol       = \"-1\"\n  cidr_ipv4         = \"0.0.0.0/0\"\n}}\n", g.label, g.label));
             }
         }
+        for o in kids.iter().filter(|n| n.kind == "other") {
+            m.push_str(&format!("\n# other: {} ({}, {}) exists in this VPC; the palette has no block for it and nothing here manages it\n", o.label, p(o, "what").replace('_', " "), p(o, "aws_id")));
+        }
         for ep in kids.iter().filter(|n| n.kind == "vpce") {
             let svc = p(ep, "service");
             adopt(format!("aws_vpc_endpoint.{}", ep.label), p(ep, "aws_id"));
@@ -192,6 +195,9 @@ pub fn generate_with(d: &Design, managed: &std::collections::HashSet<String>) ->
             let spot = g.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
             let disk = g.params.get("disk").and_then(|v| v.as_u64()).unwrap_or(8);
             let num = |k: &str, dflt: u64| g.params.get(k).and_then(|v| v.as_u64()).unwrap_or(dflt);
+            adopt(format!("aws_autoscaling_group.{}", g.label), p(g, "aws_id"));
+            adopt(format!("aws_launch_template.{}", g.label), p(g, "lt_id"));
+            let asg_start = m.len();
             let tgs: Vec<String> = d.edges.iter().filter(|e| e.kind == "target" && e.target == g.id).filter_map(|e| d.node(&e.source)).map(|lb| format!("aws_lb_target_group.{}.arn", lb.label)).collect();
             m.push_str(&format!("\n# Auto Scaling group {} ({t}{}, {}–{} instances, desired {})\nresource \"aws_launch_template\" \"{}\" {{\n  name_prefix   = \"${{var.project}}-{}-\"\n  image_id      = data.aws_ami.{ami}.id\n  instance_type = {}\n{}  vpc_security_group_ids = [{}]\n{}  block_device_mappings {{\n    device_name = \"/dev/xvda\"\n    ebs {{\n      volume_type = \"gp3\"\n      volume_size = {disk}\n    }}\n  }}\n  metadata_options {{\n    http_tokens = \"required\"\n  }}\n  tag_specifications {{\n    resource_type = \"instance\"\n    tags = {{ Name = \"${{var.project}}-{}\", \"design-block\" = {} }}\n  }}\n}}\n\nresource \"aws_autoscaling_group\" \"{}\" {{\n  name                = \"${{var.project}}-{}\"\n  min_size            = {}\n  max_size            = {}\n  desired_capacity    = {}\n  vpc_zone_identifier = [{}]\n{}  launch_template {{\n    id      = aws_launch_template.{}.id\n    version = \"$Latest\"\n  }}\n  tag {{\n    key                 = \"design-block\"\n    value               = {}\n    propagate_at_launch = false\n  }}\n}}\n",
                 g.label, if spot { ", spot" } else { "" }, num("min", 1), num("max", 2), num("desired", 1), g.label, g.label, q(t),
@@ -199,6 +205,14 @@ pub fn generate_with(d: &Design, managed: &std::collections::HashSet<String>) ->
                 if spot { "  instance_market_options {\n    market_type = \"spot\"\n  }\n".to_string() } else { String::new() }, g.label, q(&g.label),
                 g.label, g.label, num("min", 1), num("max", 2), num("desired", 1), subs.join(", "),
                 if tgs.is_empty() { String::new() } else { format!("  target_group_arns   = [{}]\n  health_check_type   = \"ELB\"\n", tgs.join(", ")) }, g.label, q(&g.label)));
+            if !p(g, "aws_id").trim().is_empty() {
+                let tail = m.split_off(asg_start);
+                let tail = tail.replacen(&format!("  name                = \"${{var.project}}-{}\"\n", g.label), &format!("  name                = {}\n", q(p(g, "aws_id"))), 1);
+                let tail = if p(g, "lt_name").trim().is_empty() { tail } else { tail.replacen(&format!("  name_prefix   = \"${{var.project}}-{}-\"\n", g.label), &format!("  name          = {}\n", q(p(g, "lt_name"))), 1) };
+                let tail = if p(g, "image_id").trim().is_empty() { tail } else { tail.replacen(&format!("  image_id      = data.aws_ami.{ami}.id\n"), &format!("  image_id      = {}\n", q(p(g, "image_id"))), 1) };
+                let tail = if p(g, "key").trim().is_empty() { tail } else { tail.replacen("  key_name      = var.key_name\n", &format!("  key_name      = {}\n", q(p(g, "key"))), 1) };
+                m.push_str(&tail);
+            }
         }
         for lb in kids.iter().filter(|n| n.kind == "alb") {
             let subs: Vec<String> = kids.iter().filter(|n| n.kind == "subnet" && p(n, "tier") == p(lb, "tier")).map(|s| format!("aws_subnet.{}.id", s.label)).collect();
@@ -207,9 +221,21 @@ pub fn generate_with(d: &Design, managed: &std::collections::HashSet<String>) ->
             let cert = p(lb, "cert").trim();
             let targets: Vec<(&crate::model::Edge, &Node)> = d.edges.iter().filter(|e| e.kind == "target" && e.source == lb.id).filter_map(|e| Some((e, d.node(&e.target)?))).collect();
             let tport = targets.first().map(|(e, _)| e.params.get("port").and_then(|v| v.as_u64()).unwrap_or(8080)).unwrap_or(8080);
+            adopt(format!("aws_lb.{}", lb.label), p(lb, "aws_id"));
+            adopt(format!("aws_lb_target_group.{}", lb.label), p(lb, "tg_arn"));
+            adopt(format!("aws_lb_listener.{}", lb.label), p(lb, "listener_arn"));
+            let lb_start = m.len();
             m.push_str(&format!("\n# load balancer {} ({}, about USD {:.0} a month idle + LCU)\nresource \"aws_lb\" \"{}\" {{\n  name               = substr(\"${{var.project}}-{}\", 0, 32)\n  load_balancer_type = \"application\"\n  internal           = {}\n  subnets            = [{}]\n{}{}}}\n\nresource \"aws_lb_target_group\" \"{}\" {{\n  name     = substr(\"${{var.project}}-{}\", 0, 32)\n  port     = {tport}\n  protocol = \"HTTP\"\n  vpc_id   = aws_vpc.{}.id\n  health_check {{\n    path = {}\n  }}\n{}}}\n",
                 lb.label, p(lb, "scheme"), crate::pricing::alb_hourly(&d.region) * crate::pricing::HOURS, lb.label, lb.label.replace('_', "-"), p(lb, "scheme") == "internal", subs.join(", "),
                 sg.map(|s| format!("  security_groups    = [{s}]\n")).unwrap_or_default(), tags(lb, &[]), lb.label, lb.label.replace('_', "-"), v.label, q(if p(lb, "health").is_empty() { "/" } else { p(lb, "health") }), tags(lb, &[])));
+            // an adopted balancer keeps its real names (a name change rebuilds it) and type
+            if !p(lb, "lb_name").trim().is_empty() {
+                let tail = m.split_off(lb_start);
+                let tail = tail.replacen(&format!("  name               = substr(\"${{var.project}}-{}\", 0, 32)\n", lb.label.replace('_', "-")), &format!("  name               = {}\n", q(p(lb, "lb_name"))), 1)
+                    .replacen(&format!("  name     = substr(\"${{var.project}}-{}\", 0, 32)\n", lb.label.replace('_', "-")), &format!("  name     = {}\n", q(p(lb, "tg_name"))), 1);
+                let tail = if p(lb, "lb_type").is_empty() { tail } else { tail.replacen("  load_balancer_type = \"application\"\n", &format!("  load_balancer_type = {}\n", q(p(lb, "lb_type"))), 1) };
+                m.push_str(&tail);
+            }
             if cert.is_empty() {
                 m.push_str(&format!("\nresource \"aws_lb_listener\" \"{}\" {{\n  load_balancer_arn = aws_lb.{}.arn\n  port              = {port}\n  protocol          = \"HTTP\"\n  default_action {{\n    type             = \"forward\"\n    target_group_arn = aws_lb_target_group.{}.arn\n  }}\n}}\n", lb.label, lb.label, lb.label));
             } else {

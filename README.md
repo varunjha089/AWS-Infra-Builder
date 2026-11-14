@@ -42,6 +42,10 @@ Apply after seeing the plan, and the Costs tab tells you beforehand what they co
   that may do nothing else. "Schedule stop and start" on an instance adds the evening/morning pair so a box priced for working
   hours really is off at night. The real instance behind an imported or applied block can be stopped, started and refreshed
   from the inspector; Start asks once more and shows the hourly price.
+- **The whole picture on import:** load balancers (with their targets as arrows) and Auto Scaling groups come in as blocks;
+  anything else that lives in the VPC and has no block in the palette (an EFS mount target, a database, a Lambda, a peering
+  connection a route points at) is drawn as a grey, read-only block, so nothing is hidden. The app never writes anything for
+  a grey block.
 - **Adopt what exists:** a plan of an imported VPC adopts the resources it found (OpenTofu `import` blocks, written for every
   block that carries an AWS id and is not yet in the state) instead of creating them again: "adopt 29, create 0". An adopted
   instance keeps its AMI and root volume. If a plan would still create a second copy of something that exists, the app says

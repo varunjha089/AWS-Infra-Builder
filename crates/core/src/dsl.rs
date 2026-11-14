@@ -366,6 +366,15 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                     errors.push(err(ln, format!("lambda: unexpected \"{}\"; the form is `lambda <name> [stop|start <instances,…>] [at HH:MM] [days weekdays|daily|weekends] [tz <zone>] [memory <MB>] [timeout <s>]`", positional.join(" "))));
                 }
             }
+            "other" => match positional.as_slice() {
+                [what] => {
+                    l.params.insert("what".into(), json!(what));
+                    for (k, v) in [("aws_id", json!("")), ("subnet", json!("")), ("note", json!(""))] {
+                        l.params.entry(k).or_insert(v);
+                    }
+                }
+                _ => errors.push(err(ln, "other: `other <name> <what> in <vpc>` (a read-only block the import drew)")),
+            },
             "cidr" => match positional.as_slice() {
                 [c] => { l.params.insert("cidr".into(), json!(c)); }
                 _ => errors.push(err(ln, "cidr: `cidr <name> <range>`, such as `cidr internet 0.0.0.0/0`")),
@@ -616,6 +625,7 @@ pub fn print(d: &Design) -> String {
                 if let Some(t) = n.params.get("timeout").and_then(|v| v.as_u64()).filter(|t| *t != 30) { s.push_str(&format!(" timeout {t}")); }
                 s
             }
+            "other" => format!("other {} {}{place}", n.label, if p(n, "what").is_empty() { "resource".to_string() } else { p(n, "what") }),
             "sg" => format!("sg {}{place}{}", n.label, if p(n, "egress") == "rules" { " egress rules" } else { "" }),
             "ec2" => {
                 let sgs: Vec<String> = n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).map(label).collect()).unwrap_or_default();
@@ -703,6 +713,7 @@ pub fn help() -> Vec<(String, String)> {
         ("cidr <name> <range>".into(), "an address range outside the design, such as `cidr internet 0.0.0.0/0`".into()),
         ("vpce <name> <service> in <vpc> [tier <tier>] [sg <group>]".into(), "a VPC endpoint: s3 and dynamodb are free gateway endpoints (route `pl-s3 -> name` from a table); the rest are interface endpoints in the tier's subnets".into()),
         ("lambda <name> [stop|start <instances,…>] [at HH:MM] [days weekdays|daily|weekends] [tz <zone>] [memory <MB>] [timeout <s>]".into(), "a Lambda function: stops or starts instances on a schedule (free tier); without stop/start it runs the custom code set in the inspector".into()),
+        ("other <name> <what> in <vpc>".into(), "a grey, read-only block the import drew for something the palette has no block for (an EFS mount target, a database, a peering connection); nothing manages it".into()),
         ("s3 <name> [gb <GB>] [versioning] [lifecycle ia-30|glacier-90|ia-30-glacier-90] [expire <days>]".into(), "a bucket with public access blocked and encryption on; gb is for the estimate".into()),
         ("alb <name> <internet|internal> in <vpc> [tier t] [sg g] [port 80|443] [cert <ACM arn>] [health /path]".into(), "an Application Load Balancer in the tier's subnets (two AZs); HTTPS when a certificate is named".into()),
         ("asg <name> <type> in <vpc> [tier t] [min n] [max n] [desired n] [sg a,b] [key k] [spot] [disk n] [hours n] [os x]".into(), "an Auto Scaling group of instances in the tier's subnets".into()),

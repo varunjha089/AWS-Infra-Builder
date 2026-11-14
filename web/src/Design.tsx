@@ -12,7 +12,7 @@ import { Num } from "./Num";
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
 import { neon, useTheme } from "./theme";
 
-export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569", vpce: "#0f766e", s3: "#15803d", alb: "#9333ea", asg: "#a16207", lambda: "#be185d" };
+export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569", vpce: "#0f766e", s3: "#15803d", alb: "#9333ea", asg: "#a16207", lambda: "#be185d", other: "#6b7280" };
 const CONTAINER = (kind: string) => kind === "vpc" || kind === "subnet";
 
 type Data = { node: DNode; result?: NodeResult; azName: string; plan?: string; mark?: string };
@@ -52,9 +52,9 @@ function BlockNode({ data, selected }: NodeProps<Node<Data>>) {
   const color = useColor();
   const st = r?.status ?? "ok";
   return (
-    <div className={`block st-${st} ${selected ? "sel" : ""}`} style={{ "--c": color(n) } as CSSProperties}>
+    <div className={`block ${n.kind} st-${st} ${selected ? "sel" : ""}`} style={{ "--c": color(n) } as CSSProperties}>
       {(n.kind === "rt" || n.kind === "sg" || n.kind === "cidr" || n.kind === "asg" || n.kind === "ec2") && <Handle type="target" position={Position.Left} />}
-      {(n.kind === "igw" || n.kind === "nat" || n.kind === "vpce") && <Handle type="target" position={Position.Top} />}
+      {(n.kind === "igw" || n.kind === "nat" || n.kind === "vpce" || n.kind === "other") && <Handle type="target" position={Position.Top} />}
       {(data.plan || data.mark) && <span className={`ribbon act-${data.mark ?? data.plan}`}>{data.mark ?? data.plan}</span>}
       <div className="lh"><span>{r?.title ?? n.kind}{mark(st)}</span><span className="bl">{n.label}</span></div>
       <div className={`ls st-${st}`}>{st !== "ok" ? r?.messages[0] : r?.summary || ""}{n.params.aws_id ? <span className="awsid"> · {String(n.params.aws_id)}</span> : null}</div>
@@ -369,6 +369,10 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
                       <option value="">none (the VPC's default group)</option>{design.nodes.filter((n) => n.kind === "sg" && n.parent === selected.parent).map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}</select></label>
                     <div className="small muted">USD 0.01 an hour per subnet of the tier, plus USD 0.01 per GB; still far cheaper than a NAT Gateway for a few services.</div>
                   </>}
+              </>}
+              {selected.kind === "other" && <>
+                <div className="msg info small">Read-only. The import found a <strong>{String(selected.params.what ?? "resource").replace(/_/g, " ")}</strong> here ({String(selected.params.aws_id ?? "")}{selected.params.subnet ? `, in ${selected.params.subnet}` : ""}). The palette has no block for it, so the app draws it grey, never changes it and writes nothing for it. {String(selected.params.note ?? "")}</div>
+                <div className="small muted">Delete the block to hide it from the picture; the real thing stays.</div>
               </>}
               {selected.kind === "alb" && <>
                 <label>Scheme<select value={String(selected.params.scheme ?? "internet")} onChange={(e) => setParam(selected.id, "scheme", e.target.value, false)}><option value="internet">internet-facing</option><option value="internal">internal (VPC only)</option></select></label>

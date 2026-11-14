@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.8.0 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.8.1 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
 Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
@@ -39,8 +39,12 @@ yet, an adopted instance keeps its AMI, AWS's default group is `aws_default_secu
 attachment writes no association; the plan counts "adopt N" and the app refuses an apply that would create a second copy of
 a block that carries an id. Verified with a real read-only plan of the owner's VPC: adopt 87, create 0, change 86 (tags and
 in-place settings), replace 0. Adopted groups keep their real name and description (both force a replacement), adopted
-instances their key pair and IAM instance profile.
-Still to come: RDS, reachability questions, import of balancers/groups, drift. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
+instances their key pair and IAM instance profile. 0.8.1: the import is complete: load balancers (listeners, target groups,
+targets -> target arrows) and Auto Scaling groups (from their launch template) come in as blocks and are adopted with their real
+names; everything else that lives in the VPC (EFS mount targets, databases, Lambda, caches: found through their network
+interfaces; peering, transit gateway and other route targets) is drawn as a grey, read-only "Other resource" block so nothing
+is hidden, and nothing is written for it.
+Still to come: RDS, reachability questions, drift. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
 another account (account guard) or the estimate exceeds the project's budget without a tick (budget guard). The app draws VPCs, subnets, Internet/NAT Gateways, route tables, security groups with
@@ -58,7 +62,7 @@ Cargo.toml                 workspace: crates/core, app/src-tauri (version in [wo
 crates/core/src/           aib-core: no UI, no AWS calls
   model.rs                 Design {name, region, azs, nodes, edges, text}; Node {id, kind, label, params, parent, x, y, w, h} (positions relative to
                            the parent); Edge {kind "attach" | "route" | "traffic" | "target", params.dest | proto + ports | port}; KINDS (vpc,
-                           subnet, igw, nat, rt, sg, ec2, cidr, vpce, s3, alb, asg, lambda) with the kind each lives in ("" = the region); REGIONS with AZ
+                           subnet, igw, nat, rt, sg, ec2, cidr, vpce, s3, alb, asg, lambda, other = grey read-only, import only) with the kind each lives in ("" = the region); REGIONS with AZ
                            counts; PORTS by name; ENDPOINT_SERVICES (gateway | interface); lambda params runtime, memory, timeout, action
                            stop|start|custom, instances (ec2 ids), time "HH:MM" ("" = no schedule), days weekdays|daily|weekends, tz, code; ec2/asg params type, os, key, public_ip, sgs, spot, disk
                            (+ asg: tier, min, max, desired), hours (1..=744, 730 = always on; the price follows it); alb params scheme, tier, sg, port, cert, health; s3 params gb, versioning, lifecycle,
@@ -122,8 +126,11 @@ crates/core/src/           aib-core: no UI, no AWS calls
   hcl.rs                   generate(&Design) = generate_with(design, managed ids) -> Files {main.tf, variables.tf, outputs.tf, imports.tf}:
                            an `import { to, id }` block for every resource whose block carries an id the state does not manage yet (vpc,
                            subnet, igw, nat + eip, route table, routes "rtb_dest", explicit associations "subnet/rtb", groups, every rule
-                           by its id, endpoints, instances); an instance with image_id uses it as `ami` (no data source); a group with
-                           aws_default is an aws_default_security_group; an implicit attachment writes no association. for the AWS provider 5: aws_vpc, aws_subnet,
+                           by its id, endpoints, instances, balancers (aws_lb, aws_lb_target_group, aws_lb_listener by ARN), scaling groups
+                           (aws_autoscaling_group by name, aws_launch_template by id)); an instance with image_id uses it as `ami` (no data
+                           source); a group with aws_default is an aws_default_security_group; an implicit attachment writes no association;
+                           an adopted group/balancer/target group/scaling group/launch template keeps its real name (a name change rebuilds
+                           it), an adopted launch template its image and key; an `other` block is a comment, nothing is managed for it. for the AWS provider 5: aws_vpc, aws_subnet,
                            aws_internet_gateway, aws_eip + aws_nat_gateway, aws_route_table/route/association, aws_security_group + one
                            aws_vpc_security_group_ingress_rule per arrow in (and egress rules, or the allow-all written down), data aws_ami per
                            OS × arch, aws_instance (gp3 root, IMDSv2); per lambda: data archive_file (the Python inline; stop/start code reads
@@ -153,12 +160,18 @@ crates/core/src/           aib-core: no UI, no AWS calls
   creds.rs                 profiles from ~/.aws/config + credentials (names, kind keys|sso|role|process, region, key hint; never a secret;
                            AWS_INFRA_BUILDER_AWS_DIR overrides the folder), Source {none | profile name | keys}, check_keys, read_only_policy()
   import.rs                Inventory {vpc, subnets, igws, nats (+ allocation_id), route_tables with routes + associations, sgs with ingress/egress
-                           PermInfo, sg_rules (SgRuleInfo: every rule's id), instances (+ image_id, disk)} -> Imported {design, notes}: tiers from the routes (0.0.0.0/0 -> igw public, -> nat private, else
+                           PermInfo, sg_rules (SgRuleInfo: every rule's id), instances (+ image_id, disk, iam_profile), lbs (LbInfo: listeners,
+                           target groups with their targets), asgs (AsgInfo: sizes, subnets, the launch template's type/image/key/groups/
+                           spot), others (OtherInfo: what, id, subnet, note)} -> Imported {design, notes}: tiers from the routes (0.0.0.0/0 -> igw public, -> nat private, else
                            isolated), AZ letters from the AZ names, NATs in their subnet, main table drawn when a subnet uses it implicitly,
                            groups (egress "all" when AWS's allow-all is the only egress rule), one cidr block per range, a traffic arrow per
                            permission (a mirrored pair once; the rule's id on the arrow as aws_id / aws_id_out; the allow-all egress rule's id
                            on the group as egress_rule_id; group_name "default" -> aws_default; a subnet on the main table by default -> the
-                           attach edge is `implicit`; the NAT's eip_alloc; the instance's image_id), instances with the OS guessed from the AMI name (deep learning [base],
+                           attach edge is `implicit`; the NAT's eip_alloc; the instance's image_id), a grey `other` block for every route
+                           target the palette lacks (peering, transit gateway, instance, interface) and for every OtherInfo, an `alb` block
+                           per load balancer (scheme, tier of its subnets, first listener's port and cert, the target group's health path,
+                           lb_name/lb_type/tg_arn/tg_name/listener_arn for the adopt) with a target arrow per instance or scaling group
+                           behind it, an `asg` block per scaling group (aws_id = its name, lt_id, lt_name, image_id), instances with the OS guessed from the AMI name (deep learning [base],
                            openvpn, jammy/22.04, ubuntu, debian, else al2023) and their addresses
                            (params address = public IPv4 or DNS, private_ip; for the Terminal tab); what was left out is noted.
                            Tested with a hand-built inventory; the AWS calls are in the app.
@@ -180,7 +193,10 @@ app/src-tauri/src/tofu.rs  OpenTofu: managed_ids(work) (the ids in terraform.tfs
                            plan to adopt everything: 0 created, replaced or destroyed.
 app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sdk-ec2): Creds {Profile | Keys}, identity(), list_vpcs(), key_pairs(),
                            create_key_pair() (free), instance_states() (read-only), set_instance_power(id, on) (Start/StopInstances: the writes
-                           outside Apply, on the owner's click only, never in tests),
+                           outside Apply, on the owner's click only, never in tests); inventory() also reads DescribeSecurityGroupRules,
+                           DescribeVolumes (root sizes), elbv2 DescribeLoadBalancers/Listeners/TargetGroups/TargetHealth, autoscaling
+                           DescribeAutoScalingGroups + DescribeLaunchTemplateVersions, and DescribeNetworkInterfaces (the interfaces no
+                           instance owns name what else lives in the VPC: EFS, RDS, Lambda, ElastiCache, ECS … -> OtherInfo, one per thing),
                            inventory() (VPC, subnets, IGWs, NATs, route tables, security groups, instances, AMI names) with a 60 s timeout
                            and readable errors. Only Describe* and GetCallerIdentity. One real test (`#[ignore]`, AWS_INFRA_BUILDER_REAL=1 with
                            the default profile) prints the account's first VPC as .aib.

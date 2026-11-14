@@ -19,6 +19,8 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 aws-config = { version = "1", features = ["behavior-version-latest", "sso"] }
 aws-sdk-ec2 = "1"
 aws-sdk-sts = "1"
+aws-sdk-elasticloadbalancingv2 = "1"
+aws-sdk-autoscaling = "1"
 aws-credential-types = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 ureq = "3"

@@ -119,6 +119,67 @@ pub struct InstanceInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListenerInfo {
+    pub arn: String,
+    pub port: i32,
+    pub protocol: String,
+    pub cert: Option<String>,
+    pub target_group_arn: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TargetGroupInfo {
+    pub arn: String,
+    pub name: String,
+    pub port: i32,
+    pub protocol: String,
+    pub health_path: String,
+    pub instance_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LbInfo {
+    pub arn: String,
+    pub name: String,
+    /// "internet-facing" | "internal"
+    pub scheme: String,
+    /// "application" | "network" | "gateway"
+    pub lb_type: String,
+    pub subnet_ids: Vec<String>,
+    pub sg_ids: Vec<String>,
+    pub listeners: Vec<ListenerInfo>,
+    pub target_groups: Vec<TargetGroupInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AsgInfo {
+    pub name: String,
+    pub min: i32,
+    pub max: i32,
+    pub desired: i32,
+    pub subnet_ids: Vec<String>,
+    pub launch_template_id: Option<String>,
+    pub launch_template_name: Option<String>,
+    pub instance_type: Option<String>,
+    pub image_id: Option<String>,
+    pub key: Option<String>,
+    pub sg_ids: Vec<String>,
+    pub spot: bool,
+    pub target_group_arns: Vec<String>,
+}
+
+/// something in the VPC the palette has no block for: drawn grey and read-only
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OtherInfo {
+    pub id: String,
+    /// a short kind: "efs_mount_target", "rds", "lambda", "ecs_task", "elasticache", "network_interface", "peering", "transit_gateway" …
+    pub what: String,
+    pub name: Option<String>,
+    pub subnet_id: Option<String>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Inventory {
     pub region: String,
     pub account: String,
@@ -133,6 +194,12 @@ pub struct Inventory {
     pub instances: Vec<InstanceInfo>,
     #[serde(default)]
     pub sg_rules: Vec<SgRuleInfo>,
+    #[serde(default)]
+    pub lbs: Vec<LbInfo>,
+    #[serde(default)]
+    pub asgs: Vec<AsgInfo>,
+    #[serde(default)]
+    pub others: Vec<OtherInfo>,
     #[serde(default)]
     pub endpoints: Vec<EndpointInfo>,
 }
@@ -228,6 +295,23 @@ pub fn to_design(inv: &Inventory) -> Imported {
         let nid = id();
         gw_node.insert(n.id.clone(), nid.clone());
         d.nodes.push(Node { id: nid, kind: "nat".into(), label: unique(label_for(&n.name, &n.id, "nat")), params: obj(json!({"aws_id": n.id, "eip_alloc": n.allocation_id.clone().unwrap_or_default()})), parent: Some(parent.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+    }
+    // what a route may point at that the palette has no block for: a grey block each, so the route is drawn, not lost
+    for rt in &inv.route_tables {
+        let unknown: Vec<&RouteInfo> = rt.routes.iter().filter(|r| r.target != "local" && !gw_node.contains_key(&r.target)).collect();
+        for r in unknown {
+            if gw_node.contains_key(&r.target) {
+                continue;
+            }
+            let what = match r.target.split('-').next().unwrap_or("") { "pcx" => "peering", "tgw" => "transit_gateway", "eni" => "network_interface", "i" => "instance", "eigw" => "egress_only_igw", "vgw" => "vpn_gateway", "vpce" => "vpc_endpoint", _ => "resource" };
+            if r.target == "?" || (what == "vpc_endpoint" && inv.endpoints.iter().any(|e| e.id == r.target)) {
+                continue;
+            }
+            let nid = id();
+            gw_node.insert(r.target.clone(), nid.clone());
+            d.nodes.push(Node { id: nid, kind: "other".into(), label: unique(format!("{what}_{}", r.target.rsplit('-').next().unwrap_or("x"))),
+                params: obj(json!({"what": what, "aws_id": r.target, "subnet": "", "note": format!("a route points at it ({})", r.target)})), parent: Some(vpc_id.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+        }
     }
     let mut en = 1;
     for rt in &inv.route_tables {
@@ -382,6 +466,71 @@ pub fn to_design(inv: &Inventory) -> Imported {
             }
         }
     }
+    // the rest: grey, read-only blocks in the VPC (the subnet is named on the block)
+    for o in &inv.others {
+        let subnet = o.subnet_id.as_ref().and_then(|s| subnet_node.get(s)).and_then(|n| d.node(n)).map(|n| n.label.clone()).unwrap_or_default();
+        let nid = id();
+        d.nodes.push(Node { id: nid, kind: "other".into(), label: unique(label_for(&o.name, &o.id, &o.what)),
+            params: obj(json!({"what": o.what, "aws_id": o.id, "subnet": subnet, "note": o.note})), parent: Some(vpc_id.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+    }
+    // Auto Scaling groups: one block each, in the tier of their subnets; their instances are already drawn as instances
+    let tier_of_subnets = |ids: &[String], d: &Design| -> String {
+        ids.iter().find_map(|s| subnet_node.get(s)).and_then(|n| d.node(n)).and_then(|n| n.params.get("tier").and_then(|v| v.as_str()).map(String::from)).unwrap_or_else(|| "private".into())
+    };
+    let mut asg_node: HashMap<String, String> = HashMap::new();
+    for g in &inv.asgs {
+        let tier = tier_of_subnets(&g.subnet_ids, &d);
+        let sgs: Vec<String> = g.sg_ids.iter().filter_map(|s| sg_node.get(s).cloned()).collect();
+        let t = g.instance_type.clone().unwrap_or_else(|| "t4g.micro".into());
+        if g.instance_type.is_none() {
+            notes.push(format!("Scaling group {}: its launch template names no instance type (mixed instances?); drawn as t4g.micro.", g.name));
+        }
+        let nid = id();
+        asg_node.insert(g.name.clone(), nid.clone());
+        d.nodes.push(Node { id: nid, kind: "asg".into(), label: unique(label_for(&Some(g.name.clone()), &g.name, "asg")),
+            params: obj(json!({"type": t, "os": "al2023", "key": g.key.clone().unwrap_or_default(), "tier": tier, "min": g.min.max(0), "max": g.max.max(1), "desired": g.desired.max(0), "sgs": sgs, "spot": g.spot, "disk": 8, "hours": 730,
+                "aws_id": g.name, "lt_id": g.launch_template_id.clone().unwrap_or_default(), "lt_name": g.launch_template_name.clone().unwrap_or_default(), "image_id": g.image_id.clone().unwrap_or_default()})),
+            parent: Some(vpc_id.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+    }
+    // load balancers: one block each, a target arrow per instance or scaling group behind them
+    let ec2_node: HashMap<String, String> = d.nodes.iter().filter(|n| n.kind == "ec2").filter_map(|n| Some((n.params.get("aws_id")?.as_str()?.to_string(), n.id.clone()))).collect();
+    for lb in &inv.lbs {
+        let tier = tier_of_subnets(&lb.subnet_ids, &d);
+        let sg = lb.sg_ids.first().and_then(|s| sg_node.get(s)).cloned().unwrap_or_default();
+        let listener = lb.listeners.first();
+        let tg = listener.and_then(|l| l.target_group_arn.as_ref()).and_then(|a| lb.target_groups.iter().find(|t| &t.arn == a)).or(lb.target_groups.first());
+        if lb.lb_type != "application" {
+            notes.push(format!("{} is a {} load balancer; the canvas draws it as a load balancer (its listeners keep their ports).", lb.name, lb.lb_type));
+        }
+        let nid = id();
+        d.nodes.push(Node { id: nid.clone(), kind: "alb".into(), label: unique(label_for(&Some(lb.name.clone()), &lb.arn, "lb")),
+            params: obj(json!({"scheme": if lb.scheme == "internal" { "internal" } else { "internet" }, "tier": tier, "sg": sg, "port": listener.map(|l| l.port).unwrap_or(80),
+                "cert": listener.and_then(|l| l.cert.clone()).unwrap_or_default(), "health": tg.map(|t| t.health_path.clone()).filter(|h| !h.is_empty()).unwrap_or_else(|| "/".into()),
+                "aws_id": lb.arn, "lb_name": lb.name, "lb_type": lb.lb_type, "tg_arn": tg.map(|t| t.arn.clone()).unwrap_or_default(), "tg_name": tg.map(|t| t.name.clone()).unwrap_or_default(),
+                "listener_arn": listener.map(|l| l.arn.clone()).unwrap_or_default()})),
+            parent: Some(vpc_id.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+        if let Some(t) = tg {
+            for i in &t.instance_ids {
+                if let Some(target) = ec2_node.get(i) {
+                    d.edges.push(Edge { id: format!("e{en}"), source: nid.clone(), target: target.clone(), kind: "target".into(), params: obj(json!({"port": t.port})) });
+                    en += 1;
+                }
+            }
+            for g in inv.asgs.iter().filter(|g| g.target_group_arns.contains(&t.arn)) {
+                if let Some(target) = asg_node.get(&g.name) {
+                    d.edges.push(Edge { id: format!("e{en}"), source: nid.clone(), target: target.clone(), kind: "target".into(), params: obj(json!({"port": t.port})) });
+                    en += 1;
+                }
+            }
+            if lb.target_groups.len() > 1 {
+                notes.push(format!("{} has {} target groups; the canvas shows the listener's one.", lb.name, lb.target_groups.len()));
+            }
+        }
+    }
+    if !inv.others.is_empty() {
+        notes.push(format!("{} thing{} the palette has no block for {} drawn grey and read-only: {}.", inv.others.len(), if inv.others.len() == 1 { "" } else { "s" }, if inv.others.len() == 1 { "is" } else { "are" },
+            inv.others.iter().map(|o| format!("{} ({})", o.name.clone().unwrap_or(o.id.clone()), o.what.replace('_', " "))).collect::<Vec<_>>().join(", ")));
+    }
     arrange(&mut d);
     crate::dsl::sync(&mut d);
     notes.insert(0, format!("Imported read-only from account {} in {}: {} subnets, {} Internet Gateway{}, {} NAT Gateway{}, {} route tables, {} security groups, {} instances. Nothing in the account was changed.",
@@ -401,6 +550,13 @@ mod tests {
     fn inventory() -> Inventory {
         Inventory {
             region: "ap-south-1".into(),
+            lbs: vec![LbInfo { arn: "arn:aws:elasticloadbalancing:ap-south-1:123456789012:loadbalancer/app/web-lb/abc".into(), name: "web-lb".into(), scheme: "internet-facing".into(), lb_type: "application".into(),
+                subnet_ids: vec!["subnet-1".into(), "subnet-2".into()], sg_ids: vec!["sg-web".into()],
+                listeners: vec![ListenerInfo { arn: "arn:lsn".into(), port: 80, protocol: "HTTP".into(), cert: None, target_group_arn: Some("arn:tg".into()) }],
+                target_groups: vec![TargetGroupInfo { arn: "arn:tg".into(), name: "web-tg".into(), port: 8080, protocol: "HTTP".into(), health_path: "/health".into(), instance_ids: vec!["i-1".into()] }] }],
+            asgs: vec![AsgInfo { name: "workers".into(), min: 1, max: 3, desired: 2, subnet_ids: vec!["subnet-3".into()], launch_template_id: Some("lt-9".into()), launch_template_name: Some("workers-lt".into()),
+                instance_type: Some("t3.small".into()), image_id: Some("ami-0w".into()), key: Some("lab".into()), sg_ids: vec!["sg-db".into()], spot: true, target_group_arns: vec!["arn:tg".into()] }],
+            others: vec![OtherInfo { id: "fsmt-1".into(), what: "efs_mount_target".into(), name: None, subnet_id: Some("subnet-3".into()), note: "EFS mount target for fs-1".into() }],
             sg_rules: vec![
                 SgRuleInfo { id: "sgr-web443".into(), group_id: "sg-web".into(), egress: false, proto: "tcp".into(), from: 443, to: 443, cidr: Some("0.0.0.0/0".into()), group: None },
                 SgRuleInfo { id: "sgr-webout".into(), group_id: "sg-web".into(), egress: true, proto: "-1".into(), from: 0, to: 0, cidr: Some("0.0.0.0/0".into()), group: None },
@@ -467,8 +623,10 @@ mod tests {
         // route tables: public, app, and the main one (db uses it implicitly)
         assert_eq!(d.nodes.iter().filter(|n| n.kind == "rt").count(), 3);
         assert_eq!(d.edges.iter().filter(|e| e.kind == "attach").count(), 4);
-        assert_eq!(d.edges.iter().filter(|e| e.kind == "route").count(), 3, "igw, nat and the S3 endpoint; the peering route is left out with a note");
-        assert!(im.notes.iter().any(|n| n.contains("pcx-1")));
+        assert_eq!(d.edges.iter().filter(|e| e.kind == "route").count(), 4, "igw, nat, the S3 endpoint and the peering connection (a grey block)");
+        let peer = d.nodes.iter().find(|n| n.kind == "other" && n.params["what"] == "peering").expect("the peering connection as a grey block");
+        assert_eq!(peer.params["aws_id"], "pcx-1");
+        assert!(d.edges.iter().any(|e| e.kind == "route" && e.target == peer.id));
         assert!(im.notes.iter().any(|n| n.contains("main table")));
         assert!(im.notes[0].contains("123456789012"));
         // security groups and instances
@@ -500,6 +658,21 @@ mod tests {
         assert!(files["main.tf"].contains("iam_instance_profile        = \"web-role\"") && files["main.tf"].contains("key_name                    = \"lab\""), "{}", files["main.tf"]);
         assert!(files["main.tf"].contains("name        = \"web\"") || files["main.tf"].contains("name        = \"prod-web\""), "the group keeps its real name: {}", files["main.tf"]);
         assert!(!files["main.tf"].contains("resource \"aws_route_table_association\" \"db\""), "an implicit attachment writes no association");
+        // the balancer, its target arrows, the scaling group and the grey block
+        let lb = d.nodes.iter().find(|n| n.kind == "alb").expect("a balancer");
+        assert_eq!((lb.params["scheme"].as_str(), lb.params["tier"].as_str(), lb.params["port"].as_i64(), lb.params["health"].as_str()), (Some("internet"), Some("public"), Some(80), Some("/health")));
+        let asg = d.nodes.iter().find(|n| n.kind == "asg").expect("a scaling group");
+        assert_eq!((asg.params["type"].as_str(), asg.params["tier"].as_str(), asg.params["desired"].as_i64(), asg.params["spot"].as_bool()), (Some("t3.small"), Some("private"), Some(2), Some(true)));
+        assert_eq!(d.edges.iter().filter(|e| e.kind == "target" && e.source == lb.id).count(), 2, "{:?}", d.edges);
+        let other = d.nodes.iter().find(|n| n.kind == "other" && n.params["aws_id"] == "fsmt-1").expect("a grey block");
+        assert_eq!((other.params["what"].as_str(), other.params["subnet"].as_str()), (Some("efs_mount_target"), Some("subnet_3")));
+        for s in ["to = aws_lb.", "loadbalancer/app/web-lb/abc", "to = aws_lb_target_group.", "id = \"arn:tg\"", "to = aws_lb_listener.", "id = \"arn:lsn\"", "to = aws_autoscaling_group.", "id = \"workers\"", "to = aws_launch_template.", "id = \"lt-9\""] {
+            assert!(imports.contains(s), "missing {s}\n{imports}");
+        }
+        for s in ["name               = \"web-lb\"", "name     = \"web-tg\"", "name                = \"workers\"", "name          = \"workers-lt\"", "image_id      = \"ami-0w\"", "# other: "] {
+            assert!(files["main.tf"].contains(s), "missing {s}\n{}", files["main.tf"]);
+        }
+        assert!(im.notes.iter().any(|n| n.contains("grey")), "{:?}", im.notes);
         assert_eq!(web1.params["key"], "lab");
         assert_eq!(web1.params["spot"], true);
         assert_eq!(web1.params["disk"], 50);
@@ -508,8 +681,14 @@ mod tests {
         assert!(im.notes.iter().any(|n| n.contains("x9.odd")));
         assert!(im.notes.iter().any(|n| n.contains("is stopped")));
         assert!(d.text.as_ref().unwrap().contains("rule internet -> web tcp 443"), "{}", d.text.as_ref().unwrap());
-        assert!(d.text.as_ref().unwrap().contains("rt app in prod_vpc: 0.0.0.0/0 -> nat_a, pl-s3 -> s3_endpoint"), "{}", d.text.as_ref().unwrap());
+        assert!(d.text.as_ref().unwrap().contains("rt app in prod_vpc: 0.0.0.0/0 -> nat_a, 10.9.0.0/16 -> peering_1, pl-s3 -> s3_endpoint"), "{}", d.text.as_ref().unwrap());
         assert!(d.text.as_ref().unwrap().contains("vpce ssm_ep_2 ssm in prod_vpc tier private sg prod_db"), "{}", d.text.as_ref().unwrap());
+        for line in ["other efs_mount_target_1 efs_mount_target in prod_vpc", "alb web_lb internet in prod_vpc tier public sg web health /health", "asg workers t3.small in prod_vpc tier private min 1 max 3 desired 2 sg prod_db key lab spot", "target web_lb -> workers 8080"] {
+            assert!(d.text.as_ref().unwrap().contains(line), "missing {line}\n{}", d.text.as_ref().unwrap());
+        }
+        // the text round-trips with the grey blocks and the balancer in it
+        let again = crate::dsl::parse(d.text.as_ref().unwrap(), Some(d)).unwrap();
+        assert_eq!(again.nodes.iter().filter(|n| n.kind == "other").count(), 2);
         let a = analyse(d);
         // the unknown type is a warning on its block (the owner may know it); nothing is red
         assert_eq!(a.errors, 0, "{:?}", a.problems);

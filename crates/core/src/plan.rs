@@ -127,7 +127,7 @@ pub fn parse_plan(d: &Design, show_json: &str) -> Result<PlanSummary, String> {
 /// the blocks a plan would create or replace although they already exist in AWS (they carry an id): applying it would make a
 /// second copy and pay twice. The Plan tab refuses such an apply
 pub fn duplicates(d: &Design, s: &PlanSummary) -> Vec<String> {
-    let mut out: Vec<String> = s.changes.iter().filter(|c| c.action == "create" || c.action == "replace")
+    let mut out: Vec<String> = s.changes.iter().filter(|c| (c.action == "create" || c.action == "replace") && c.resource_type != "aws_lb_target_group_attachment")
         .filter_map(|c| c.block_id.as_ref().and_then(|id| d.node(id)))
         .filter(|n| !n.params.get("aws_id").and_then(|v| v.as_str()).unwrap_or("").is_empty())
         .map(|n| n.label.clone()).collect();

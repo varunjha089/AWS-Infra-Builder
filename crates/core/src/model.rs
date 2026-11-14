@@ -92,6 +92,9 @@ pub const KINDS: &[(&str, &str, &str)] = &[
     ("alb", "Load balancer", "vpc"),
     ("asg", "Auto Scaling group", "vpc"),
     ("lambda", "Lambda function", ""),
+    // grey, read-only: something the import found that the palette has no block for (an EFS mount target, a database, a
+    // peering connection …); the app draws it so the picture is complete and never changes it
+    ("other", "Other resource", "vpc"),
 ];
 
 /// (service, title, "gateway" | "interface"): gateway endpoints are free and route through the route table; interface endpoints
@@ -246,6 +249,7 @@ pub fn defaults(kind: &str) -> Params {
         // public access blocked and encryption on always; `gb` is only for the estimate; lifecycle moves old objects to cheaper storage
         "s3" => json!({"versioning": false, "lifecycle": "none", "expire_days": 0, "gb": 10}),
         // a function that stops or starts instances on a schedule (free tier), or custom Python; time "" = no schedule
+        "other" => json!({"what": "resource", "aws_id": "", "subnet": "", "note": ""}),
         "lambda" => json!({"runtime": "python3.12", "memory": 128, "timeout": 30, "action": "stop", "instances": [], "time": "19:00", "days": "weekdays", "tz": "Asia/Kolkata", "code": ""}),
         // an internet-facing ALB in the public subnets; HTTP on 80 until a certificate (ACM ARN) is named, then HTTPS on 443
         "alb" => json!({"scheme": "internet", "tier": "public", "sg": "", "port": 80, "cert": "", "health": "/"}),
@@ -265,7 +269,7 @@ pub fn az_letters(azs: u8) -> Vec<String> {
 pub fn edge_kind(source: &str, target: &str) -> Option<&'static str> {
     match (source, target) {
         ("subnet", "rt") => Some("attach"),
-        ("rt", "igw") | ("rt", "nat") | ("rt", "vpce") => Some("route"),
+        ("rt", "igw") | ("rt", "nat") | ("rt", "vpce") | ("rt", "other") => Some("route"),
         ("sg", "sg") | ("sg", "cidr") | ("cidr", "sg") => Some("traffic"),
         ("alb", "asg") | ("alb", "ec2") => Some("target"),
         _ => None,

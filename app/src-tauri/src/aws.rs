@@ -2,7 +2,7 @@
 //! profile in ~/.aws (the SDK reads the files and handles SSO) or from the keys pasted into the app (handed to the SDK for one
 //! call at a time; they live in the keychain, see main.rs). Only Describe* and GetCallerIdentity are ever called here.
 
-use aib_core::import::{EndpointInfo, InstanceInfo, Inventory, NatInfo, PermInfo, RouteInfo, RouteTableInfo, SgInfo, SgRuleInfo, SubnetInfo, VpcInfo};
+use aib_core::import::{AsgInfo, EndpointInfo, InstanceInfo, Inventory, LbInfo, ListenerInfo, NatInfo, OtherInfo, PermInfo, RouteInfo, RouteTableInfo, SgInfo, SgRuleInfo, SubnetInfo, TargetGroupInfo, VpcInfo};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_ec2::types::Filter;
 use serde::Serialize;
@@ -193,7 +193,91 @@ pub async fn inventory(creds: Creds, region: &str, vpc_id: &str, account: &str) 
             endpoint_type: e.vpc_endpoint_type().map(|t| t.as_str().to_string()).unwrap_or_default(),
             route_table_ids: e.route_table_ids().to_vec(), subnet_ids: e.subnet_ids().to_vec(), sg_ids: e.groups().iter().filter_map(|g| g.group_id()).map(String::from).collect(),
         }).collect();
-        Ok(Inventory { region: region.into(), account: account.into(), vpc, subnets, igws, nats, route_tables, sgs, instances, endpoints, sg_rules })
+        // load balancers (elbv2: Describe* only), with their listeners, target groups and targets
+        let elb = aws_sdk_elasticloadbalancingv2::Client::new(&conf);
+        let mut lbs: Vec<LbInfo> = vec![];
+        if let Ok(out) = elb.describe_load_balancers().send().await {
+            for lb in out.load_balancers().iter().filter(|l| l.vpc_id() == Some(vpc_id)) {
+                let arn = lb.load_balancer_arn().unwrap_or("").to_string();
+                let listeners = elb.describe_listeners().load_balancer_arn(&arn).send().await.map(|o| o.listeners().iter().map(|l| ListenerInfo {
+                    arn: l.listener_arn().unwrap_or("").into(), port: l.port().unwrap_or(80), protocol: l.protocol().map(|p| p.as_str().to_string()).unwrap_or_default(),
+                    cert: l.certificates().first().and_then(|c| c.certificate_arn()).map(String::from),
+                    target_group_arn: l.default_actions().iter().find_map(|a| a.target_group_arn()).map(String::from),
+                }).collect()).unwrap_or_default();
+                let mut target_groups: Vec<TargetGroupInfo> = vec![];
+                if let Ok(tgs) = elb.describe_target_groups().load_balancer_arn(&arn).send().await {
+                    for tg in tgs.target_groups() {
+                        let tarn = tg.target_group_arn().unwrap_or("").to_string();
+                        let instance_ids = elb.describe_target_health().target_group_arn(&tarn).send().await.map(|h| h.target_health_descriptions().iter().filter_map(|t| t.target()).filter_map(|t| t.id()).map(String::from).collect()).unwrap_or_default();
+                        target_groups.push(TargetGroupInfo { arn: tarn, name: tg.target_group_name().unwrap_or("").into(), port: tg.port().unwrap_or(80), protocol: tg.protocol().map(|p| p.as_str().to_string()).unwrap_or_default(), health_path: tg.health_check_path().unwrap_or("").into(), instance_ids });
+                    }
+                }
+                lbs.push(LbInfo {
+                    arn, name: lb.load_balancer_name().unwrap_or("").into(), scheme: lb.scheme().map(|s| s.as_str().to_string()).unwrap_or_default(), lb_type: lb.r#type().map(|t| t.as_str().to_string()).unwrap_or_default(),
+                    subnet_ids: lb.availability_zones().iter().filter_map(|z| z.subnet_id()).map(String::from).collect(), sg_ids: lb.security_groups().to_vec(), listeners, target_groups,
+                });
+            }
+        }
+        // Auto Scaling groups whose subnets are in this VPC, with what their launch template says
+        let vpc_subnets: Vec<String> = subnets.iter().map(|s| s.id.clone()).collect();
+        let asc = aws_sdk_autoscaling::Client::new(&conf);
+        let mut asgs: Vec<AsgInfo> = vec![];
+        if let Ok(out) = asc.describe_auto_scaling_groups().send().await {
+            for g in out.auto_scaling_groups() {
+                let subnet_ids: Vec<String> = g.vpc_zone_identifier().unwrap_or("").split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                if !subnet_ids.iter().any(|s| vpc_subnets.contains(s)) {
+                    continue;
+                }
+                let lt = g.launch_template().or_else(|| g.mixed_instances_policy().and_then(|m| m.launch_template()).and_then(|l| l.launch_template_specification()));
+                let mut info = AsgInfo {
+                    name: g.auto_scaling_group_name().unwrap_or("").into(), min: g.min_size().unwrap_or(0), max: g.max_size().unwrap_or(1), desired: g.desired_capacity().unwrap_or(0), subnet_ids,
+                    launch_template_id: lt.and_then(|l| l.launch_template_id()).map(String::from), launch_template_name: lt.and_then(|l| l.launch_template_name()).map(String::from),
+                    target_group_arns: g.target_group_arns().to_vec(), ..Default::default()
+                };
+                if let Some(id) = info.launch_template_id.clone() {
+                    let version = lt.and_then(|l| l.version()).unwrap_or("$Default").to_string();
+                    if let Ok(v) = ec2.describe_launch_template_versions().launch_template_id(id).versions(version).send().await {
+                        if let Some(data) = v.launch_template_versions().first().and_then(|x| x.launch_template_data()) {
+                            info.instance_type = data.instance_type().map(|t| t.as_str().to_string());
+                            info.image_id = data.image_id().map(String::from);
+                            info.key = data.key_name().map(String::from);
+                            info.sg_ids = data.security_group_ids().to_vec();
+                            info.spot = data.instance_market_options().and_then(|m| m.market_type()).map(|m| m.as_str() == "spot").unwrap_or(false);
+                        }
+                    }
+                }
+                asgs.push(info);
+            }
+        }
+        // everything else that lives in the VPC shows up as a network interface: EFS mount targets, databases, Lambda, caches …
+        let instance_ids: Vec<String> = instances.iter().map(|i| i.id.clone()).collect();
+        let mut others: Vec<OtherInfo> = vec![];
+        if let Ok(out) = ec2.describe_network_interfaces().filters(by_vpc("vpc-id")).send().await {
+            for eni in out.network_interfaces() {
+                let desc = eni.description().unwrap_or("").to_string();
+                let attached_instance = eni.attachment().and_then(|a| a.instance_id()).map(String::from);
+                if attached_instance.as_ref().map(|i| instance_ids.contains(i)).unwrap_or(false) || attached_instance.is_some() {
+                    continue;
+                }
+                let d = desc.to_lowercase();
+                let (what, id) = if d.starts_with("efs mount target") { ("efs_mount_target", desc.split('(').nth(1).and_then(|s| s.split(')').next()).unwrap_or("").to_string()) }
+                    else if d.starts_with("rdsnetworkinterface") { ("rds", String::new()) }
+                    else if d.starts_with("aws lambda vpc eni") { ("lambda", desc.trim_start_matches("AWS Lambda VPC ENI-").split('-').next().unwrap_or("").to_string()) }
+                    else if d.starts_with("elasticache") { ("elasticache", String::new()) }
+                    else if d.starts_with("arn:aws:ecs") { ("ecs_task", String::new()) }
+                    else if d.starts_with("elb app/") || d.starts_with("elb net/") || d.starts_with("elb gwy/") || d.contains("nat gateway") || d.starts_with("vpc endpoint interface") { continue }
+                    else if d.starts_with("redshift") { ("redshift", String::new()) }
+                    else if d.contains("eks") { ("eks", String::new()) }
+                    else if d.starts_with("datasync") || d.starts_with("fsx") || d.starts_with("amazon mq") || d.starts_with("opensearch") || d.starts_with("es ") { ("managed_service", String::new()) }
+                    else { ("network_interface", String::new()) };
+                let id = if id.is_empty() { eni.network_interface_id().unwrap_or("").to_string() } else { id };
+                if others.iter().any(|o| o.id == id) {
+                    continue; // one block per thing, not per interface (a mount target or a database has one per AZ)
+                }
+                others.push(OtherInfo { id, what: what.into(), name: name_tag(eni.tag_set()), subnet_id: eni.subnet_id().map(String::from), note: if desc.is_empty() { String::new() } else { desc } });
+            }
+        }
+        Ok(Inventory { region: region.into(), account: account.into(), vpc, subnets, igws, nats, route_tables, sgs, instances, endpoints, sg_rules, lbs, asgs, others })
     }).await
 }
 

@@ -627,6 +627,14 @@ pub fn analyse(d: &Design) -> Analysis {
     }
 
     // ---- S3 buckets
+    // ---- grey blocks: read-only, said so
+    for o in d.nodes.iter().filter(|n| n.kind == "other") {
+        let what = p(o, "what").replace('_', " ");
+        info.entry(o.id.clone()).or_default().push(format!("Read-only: {what} ({}){}. The palette has no block for it; the app draws it so nothing is hidden and never changes it.{}", p(o, "aws_id"),
+            if p(o, "subnet").is_empty() { String::new() } else { format!(" in {}", p(o, "subnet")) }, if p(o, "note").is_empty() { String::new() } else { format!(" {}.", p(o, "note")) }));
+        summary.insert(o.id.clone(), format!("{what} · read-only{}", if p(o, "subnet").is_empty() { String::new() } else { format!(" · {}", p(o, "subnet")) }));
+    }
+
     // ---- Lambda functions: what they act on, the schedule, the limits AWS has
     let stoppers: Vec<&Node> = d.nodes.iter().filter(|n| n.kind == "lambda" && p(n, "action") == "stop").collect();
     for f in d.nodes.iter().filter(|n| n.kind == "lambda") {
