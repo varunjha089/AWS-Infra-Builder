@@ -49,7 +49,8 @@ Apply after seeing the plan, and the Costs tab tells you beforehand what they co
 - **Adopt what exists:** a plan of an imported VPC adopts the resources it found (OpenTofu `import` blocks, written for every
   block that carries an AWS id and is not yet in the state) instead of creating them again: "adopt 29, create 0". An adopted
   instance keeps its AMI and root volume. If a plan would still create a second copy of something that exists, the app says
-  so and refuses to apply it.
+  so and refuses to apply it. Before every plan of an imported project the app reads the VPC again and fills in what the adopt
+  needs (images, real names, rule ids), so a project imported with an older version works too.
 - **Terminal tab:** SSH into your instances from inside the app, like Termius. Every instance of the design is a host with the
   user its OS expects, the key pair's `.pem` file and its address (from the import, or from the outputs after Apply); press
   "Connect (SSH)" on an instance block, or save any other machine in the list. It runs your own `ssh` in a real terminal

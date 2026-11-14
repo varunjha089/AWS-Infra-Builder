@@ -429,6 +429,49 @@ mod tests {
         assert!(aib_core::plan::duplicates(&design, &p).is_empty());
     }
 
+    /// an older imported design (AWS_INFRA_BUILDER_DESIGN=<design.json>, a copy: the file is read, never written) gets its adopt
+    /// facts from AWS and plans with nothing created, replaced or destroyed. AWS_INFRA_BUILDER_REAL=1, read-only, never apply
+    #[test]
+    #[ignore]
+    fn real_plan_of_an_older_imported_design_after_refresh() {
+        if std::env::var("AWS_INFRA_BUILDER_REAL").is_err() {
+            return;
+        }
+        let path = std::env::var("AWS_INFRA_BUILDER_DESIGN").expect("AWS_INFRA_BUILDER_DESIGN=<design.json>");
+        let vpc_id = std::env::var("AWS_INFRA_BUILDER_VPC").expect("AWS_INFRA_BUILDER_VPC=<vpc id>");
+        let region = std::env::var("AWS_INFRA_BUILDER_REGION").unwrap_or_else(|_| "ap-south-1".into());
+        let mut design: aib_core::model::Design = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let t = tempfile::tempdir().unwrap();
+        std::env::set_var("AWS_INFRA_BUILDER_HOME", t.path().join("home"));
+        let tofu = locate().expect("OpenTofu installed");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let creds = crate::aws::Creds::Profile("default".into());
+        let identity = rt.block_on(crate::aws::identity(creds.clone(), &region)).unwrap();
+        let inv = rt.block_on(crate::aws::inventory(creds, &region, &vpc_id, &identity.account)).unwrap();
+        let fresh = aib_core::import::to_design(&inv).design;
+        let notes = aib_core::import::refresh_facts(&mut design, &fresh);
+        println!("REFRESH: {notes:?}");
+        let project = t.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let jobs = Jobs::default();
+        plan(&jobs, Ctx { tofu, project: project.clone(), project_name: "older".into(), design: design.clone(), env: vec![("AWS_PROFILE".into(), "default".into())] }, false).unwrap();
+        let start = std::time::Instant::now();
+        while jobs.running() && start.elapsed().as_secs() < 900 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        let snap = jobs.snapshot(0);
+        println!("{}", snap.log.join("\n"));
+        assert_eq!(snap.state, "done", "{}", snap.message);
+        let p = snap.plan.expect("a plan summary");
+        println!("PLAN: {}", p.summary);
+        for c in &p.changes {
+            println!("  {} {} ({}){}", c.action, c.address, c.block_label.clone().unwrap_or_default(), if c.replace_because.is_empty() { String::new() } else { format!(" because {}", c.replace_because.join(", ")) });
+        }
+        // the owner may have changed the design since the import (a narrowed rule is a real create); nothing is rebuilt or lost
+        assert_eq!((p.replaces, p.destroys), (0, 0), "{}", p.summary);
+        assert!(p.imports > 0 && aib_core::plan::duplicates(&design, &p).is_empty(), "{}", p.summary);
+    }
+
     /// a real `tofu plan` of the cheapest template with the owner's default profile: read-only (plan creates nothing), only when
     /// asked for (AWS_INFRA_BUILDER_REAL=1); the project lives in a temp folder, OpenTofu must be installed
     #[test]

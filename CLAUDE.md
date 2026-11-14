@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.8.1 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.8.2 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
 Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
@@ -43,7 +43,12 @@ instances their key pair and IAM instance profile. 0.8.1: the import is complete
 targets -> target arrows) and Auto Scaling groups (from their launch template) come in as blocks and are adopted with their real
 names; everything else that lives in the VPC (EFS mount targets, databases, Lambda, caches: found through their network
 interfaces; peering, transit gateway and other route targets) is drawn as a grey, read-only "Other resource" block so nothing
-is hidden, and nothing is written for it.
+is hidden, and nothing is written for it. 0.8.2: a project imported before 0.8.0 planned with errors ("No association found"
+for the implicit main-table attachments) and wanted to rebuild its instances (no image id): before every plan of an imported
+project the app now reads the VPC again (Describe* only) and fills the adopt facts into the existing blocks and arrows
+(`import::refresh_facts`: images, keys, IAM profiles, root sizes, real group names, rule ids, EIP allocations, the implicit
+marks), changing nothing the owner drew; an adopted instance no longer writes associate_public_ip_address (computed; an
+Elastic IP reads as false and writing true would rebuild it).
 Still to come: RDS, reachability questions, drift. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
@@ -126,7 +131,7 @@ crates/core/src/           aib-core: no UI, no AWS calls
   hcl.rs                   generate(&Design) = generate_with(design, managed ids) -> Files {main.tf, variables.tf, outputs.tf, imports.tf}:
                            an `import { to, id }` block for every resource whose block carries an id the state does not manage yet (vpc,
                            subnet, igw, nat + eip, route table, routes "rtb_dest", explicit associations "subnet/rtb", groups, every rule
-                           by its id, endpoints, instances, balancers (aws_lb, aws_lb_target_group, aws_lb_listener by ARN), scaling groups
+                           by its id, endpoints, instances (an adopted one omits associate_public_ip_address), balancers (aws_lb, aws_lb_target_group, aws_lb_listener by ARN), scaling groups
                            (aws_autoscaling_group by name, aws_launch_template by id)); an instance with image_id uses it as `ami` (no data
                            source); a group with aws_default is an aws_default_security_group; an implicit attachment writes no association;
                            an adopted group/balancer/target group/scaling group/launch template keeps its real name (a name change rebuilds
@@ -170,6 +175,8 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            attach edge is `implicit`; the NAT's eip_alloc; the instance's image_id), a grey `other` block for every route
                            target the palette lacks (peering, transit gateway, instance, interface) and for every OtherInfo, an `alb` block
                            per load balancer (scheme, tier of its subnets, first listener's port and cert, the target group's health path,
+                           refresh_facts(design, fresh) = the adopt facts of a fresh import copied onto the blocks (by aws_id) and arrows
+                           (by ends, proto and ports; attachments by ends) of an existing design, nothing else touched; returns notes,
                            lb_name/lb_type/tg_arn/tg_name/listener_arn for the adopt) with a target arrow per instance or scaling group
                            behind it, an `asg` block per scaling group (aws_id = its name, lt_id, lt_name, image_id), instances with the OS guessed from the AMI name (deep learning [base],
                            openvpn, jammy/22.04, ubuntu, debian, else al2023) and their addresses
@@ -190,7 +197,8 @@ app/src-tauri/src/tofu.rs  OpenTofu: managed_ids(work) (the ids in terraform.tfs
                            Credentials only in the child's environment (AWS_PROFILE, or the three key variables). One `#[ignore]` real
                            test plans the web_server template read-only (12 to add) with the default profile; another
                            (`real_plan_of_an_imported_vpc_adopts_everything`, AWS_INFRA_BUILDER_VPC=<id>) imports a VPC and expects its
-                           plan to adopt everything: 0 created, replaced or destroyed.
+                           plan to adopt everything: 0 created, replaced or destroyed; a third (`real_plan_of_an_older_imported_design_after_refresh`,
+                           + AWS_INFRA_BUILDER_DESIGN=<a copy of a design.json>) refreshes an older import's facts and expects the same.
 app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sdk-ec2): Creds {Profile | Keys}, identity(), list_vpcs(), key_pairs(),
                            create_key_pair() (free), instance_states() (read-only), set_instance_power(id, on) (Start/StopInstances: the writes
                            outside Apply, on the owner's click only, never in tests); inventory() also reads DescribeSecurityGroupRules,
@@ -202,7 +210,7 @@ app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sd
                            the default profile) prints the account's first VPC as .aib.
 app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load, save_design, design_from_text, design_arrange(sizes), design_tidy(id, sizes), design_fix(id | all_safe, sizes; my_ip() via ureq when the fix needs it; lays out again when blocks came or went), design_add(kind, parent, params: the dialog's type/os/hours onto the new block), instance_recommend(vcpu, ram, gpu, hours, region),
                            design_connect, design_remove, text_help, code, export_code, pick_folder, open_url; tofu_status, tofu_install,
-                           tofu_plan(destroy), tofu_apply(confirm, accept_budget) (refused when plan::duplicates() names a block that would be created or replaced although it carries an id; guarded_ctx: live identity, account guard against
+                           tofu_plan(destroy) (an imported project first gets refresh_facts() from a fresh read of its VPC; returns the notes, the Plan tab toasts them), tofu_apply(confirm, accept_budget) (refused when plan::duplicates() names a block that would be created or replaced although it carries an id; guarded_ctx: live identity, account guard against
                            project.json "aws".account set by the first plan, region guard, budget guard), job_status(since),
                            project_set_budget, design_set_aws_ids (the created ids onto the blocks, and from the outputs the instances'
                            public/private addresses); hosts_state(design) {saved, suggested, ssh path}, hosts_save, key_check, key_fix,

@@ -536,16 +536,35 @@ async fn guarded_ctx(st: &State<'_, App>) -> R<tofu::Ctx> {
     Ok(tofu::Ctx { tofu: tofu_path, project: p.dir.clone(), project_name: p.name(), design, env: tofu_env()? })
 }
 
+/// before a plan of an imported project: the facts an adopt needs (images, real names, rule ids, implicit attachments) are
+/// read again from AWS (Describe* only) and filled into the design's blocks; the owner's drawing is not changed otherwise
+async fn refresh_facts(p: &Project, design: &mut Design) -> R<Vec<String>> {
+    let meta = project_meta(p);
+    if !meta["aws"]["imported"].as_bool().unwrap_or(false) {
+        return Ok(vec![]);
+    }
+    let (Some(vpc_id), Some(region), Some(account)) = (meta["aws"]["vpc_id"].as_str(), meta["aws"]["region"].as_str(), meta["aws"]["account"].as_str()) else { return Ok(vec![]) };
+    let inv = aws::inventory(creds_for_call()?, region, vpc_id, account).await?;
+    let fresh = import::to_design(&inv).design;
+    let notes = import::refresh_facts(design, &fresh);
+    if !notes.is_empty() {
+        p.save_design(design).map_err(e)?;
+    }
+    Ok(notes)
+}
+
 #[tauri::command]
-async fn tofu_plan(st: State<'_, App>, destroy: bool) -> R<()> {
+async fn tofu_plan(st: State<'_, App>, destroy: bool) -> R<Vec<String>> {
     if st.jobs.running() {
         return Err("A job is still running.".into());
     }
-    let cx = guarded_ctx(&st).await?;
+    let mut cx = guarded_ctx(&st).await?;
+    let notes = refresh_facts(&project(&st)?, &mut cx.design).await?;
     if !destroy && !checks::analyse(&cx.design).ok {
         return Err("The design has errors; fix them before planning.".into());
     }
-    tofu::plan(&st.jobs, cx, destroy)
+    tofu::plan(&st.jobs, cx, destroy)?;
+    Ok(notes)
 }
 
 /// apply the shown plan; `confirm` must be the project's name when anything is destroyed or replaced; `accept_budget` when the

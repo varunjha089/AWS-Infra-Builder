@@ -27,7 +27,7 @@ export function PlanTab({ st, design, analysis, job, startJob, toast, goDesign }
   const estimatedAfter = analysis.cost.total;
   const overBudget = !!status.budget && estimatedAfter > status.budget && !isDestroyPlan;
   const canApply = !!havePlan && !plan!.empty && !running && (!dangerous || typed.trim() === projectName) && (!overBudget || acceptBudget);
-  const go = (p: Promise<unknown>) => p.then(() => { setTyped(""); startJob(); }).catch((e) => toast(errText(e)));
+  const go = (p: Promise<unknown>) => p.then((r) => { setTyped(""); startJob(); if (Array.isArray(r) && r.length > 0) toast(`Facts refreshed from AWS before the plan: ${r.join(" ")}`); }).catch((e) => toast(errText(e)));
   const guardOk = !status.project_account || !status.identity || status.project_account === status.identity.account;
 
   return (

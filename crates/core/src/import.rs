@@ -542,6 +542,77 @@ fn obj(v: serde_json::Value) -> Params {
     v.as_object().cloned().unwrap_or_default()
 }
 
+/// the facts an adopt needs, copied from a fresh import onto the blocks of an existing design that carry the same ids: the
+/// instance's image, key, IAM profile and root volume, the group's real name and rule ids, the NAT's EIP allocation, the
+/// balancer's and scaling group's names and ARNs, the rule ids on the traffic arrows, the implicit mark on attachments to the
+/// main table. Nothing the owner drew changes: no block is added, moved, relabelled or removed. Returns what was filled, in words
+pub fn refresh_facts(d: &mut Design, fresh: &Design) -> Vec<String> {
+    let mut notes = vec![];
+    let aid = |n: &Node| n.params.get("aws_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let fresh_by_id: HashMap<String, &Node> = fresh.nodes.iter().filter(|n| !aid(n).is_empty()).map(|n| (aid(n), n)).collect();
+    let keys: &[(&str, &[&str])] = &[
+        ("ec2", &["image_id", "iam_profile", "disk", "key", "address", "private_ip", "state"]),
+        ("sg", &["group_name", "aws_default", "egress_rule_id", "description"]),
+        ("nat", &["eip_alloc"]),
+        ("alb", &["lb_name", "lb_type", "tg_arn", "tg_name", "listener_arn"]),
+        ("asg", &["lt_id", "lt_name", "image_id"]),
+        ("subnet", &["map_public_ip"]),
+    ];
+    let mut filled = 0;
+    for n in d.nodes.iter_mut() {
+        let Some(f) = fresh_by_id.get(&aid(n)) else { continue };
+        if f.kind != n.kind { continue; }
+        for (kind, ks) in keys {
+            if *kind != n.kind.as_str() { continue; }
+            for k in ks.iter() {
+                let Some(v) = f.params.get(*k) else { continue };
+                let empty = v.as_str().map(|s| s.is_empty()).unwrap_or(false);
+                if empty { continue; }
+                // the root volume: only when the design still has the default (the owner may have asked for more)
+                if *k == "disk" && n.params.get("disk").and_then(|x| x.as_u64()) != Some(8) { continue; }
+                if n.params.get(*k) != Some(v) {
+                    n.params.insert((*k).into(), v.clone());
+                    filled += 1;
+                }
+            }
+        }
+    }
+    // the ids of the design's blocks by their AWS ids, for the edges
+    let mine_by_aid: HashMap<String, String> = d.nodes.iter().filter(|n| !aid(n).is_empty()).map(|n| (aid(n), n.id.clone())).collect();
+    let fresh_aid = |id: &str| fresh.node(id).map(aid).unwrap_or_default();
+    let fresh_cidr = |id: &str| fresh.node(id).filter(|n| n.kind == "cidr").map(|n| n.params.get("cidr").and_then(|v| v.as_str()).unwrap_or("").to_string()).unwrap_or_default();
+    let mine_cidr: HashMap<String, String> = d.nodes.iter().filter(|n| n.kind == "cidr").map(|n| (n.id.clone(), n.params.get("cidr").and_then(|v| v.as_str()).unwrap_or("").to_string())).collect();
+    let mut rules = 0;
+    for e in d.edges.iter_mut() {
+        if e.kind == "traffic" {
+            let (proto, ports) = (e.params.get("proto").cloned(), e.params.get("ports").cloned());
+            let fe = fresh.edges.iter().find(|x| x.kind == "traffic" && x.params.get("proto") == proto.as_ref() && x.params.get("ports") == ports.as_ref()
+                && (mine_by_aid.get(&fresh_aid(&x.source)) == Some(&e.source) || (!fresh_cidr(&x.source).is_empty() && mine_cidr.get(&e.source) == Some(&fresh_cidr(&x.source))))
+                && (mine_by_aid.get(&fresh_aid(&x.target)) == Some(&e.target) || (!fresh_cidr(&x.target).is_empty() && mine_cidr.get(&e.target) == Some(&fresh_cidr(&x.target)))));
+            if let Some(fe) = fe {
+                for k in ["aws_id", "aws_id_out"] {
+                    if let Some(v) = fe.params.get(k) {
+                        if e.params.get(k) != Some(v) { e.params.insert(k.into(), v.clone()); rules += 1; }
+                    }
+                }
+            }
+        }
+        if e.kind == "attach" {
+            let fe = fresh.edges.iter().find(|x| x.kind == "attach" && mine_by_aid.get(&fresh_aid(&x.source)) == Some(&e.source) && mine_by_aid.get(&fresh_aid(&x.target)) == Some(&e.target));
+            if let Some(fe) = fe {
+                let imp = fe.params.get("implicit").cloned().unwrap_or(json!(false));
+                if e.params.get("implicit").cloned().unwrap_or(json!(false)) != imp {
+                    e.params.insert("implicit".into(), imp);
+                    rules += 1;
+                }
+            }
+        }
+    }
+    if filled > 0 { notes.push(format!("{filled} fact{} about the blocks filled in from AWS (images, names, sizes, ids).", if filled == 1 { "" } else { "s" })); }
+    if rules > 0 { notes.push(format!("{rules} arrow{} got the id of the rule or attachment it stands for.", if rules == 1 { "" } else { "s" })); }
+    notes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,6 +744,21 @@ mod tests {
             assert!(files["main.tf"].contains(s), "missing {s}\n{}", files["main.tf"]);
         }
         assert!(im.notes.iter().any(|n| n.contains("grey")), "{:?}", im.notes);
+        // an older import of the same VPC (no facts, no implicit marks) gets them from a fresh one; nothing else moves
+        let mut old = d.clone();
+        for n in old.nodes.iter_mut() { for k in ["image_id", "iam_profile", "group_name", "egress_rule_id", "eip_alloc"] { n.params.remove(k); } }
+        for e in old.edges.iter_mut() { e.params.remove("aws_id"); e.params.remove("aws_id_out"); e.params.remove("implicit"); }
+        old.nodes.iter_mut().find(|n| n.label == "web_1").unwrap().params.insert("disk".into(), json!(50));
+        let before = (old.nodes.len(), old.edges.len(), old.nodes.iter().map(|n| n.label.clone()).collect::<Vec<_>>());
+        let notes = refresh_facts(&mut old, d);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let w = old.by_label("web_1").unwrap();
+        assert_eq!((w.params["image_id"].as_str(), w.params["iam_profile"].as_str(), w.params["disk"].as_u64()), (Some("ami-0web"), Some("web-role"), Some(50)));
+        assert_eq!(old.nodes.iter().find(|n| n.kind == "nat").unwrap().params["eip_alloc"], "eipalloc-7");
+        assert!(old.edges.iter().any(|e| e.kind == "traffic" && e.params.get("aws_id").and_then(|v| v.as_str()) == Some("sgr-web443")));
+        assert!(old.edges.iter().any(|e| e.kind == "attach" && e.params.get("implicit") == Some(&json!(true))));
+        assert_eq!((old.nodes.len(), old.edges.len(), old.nodes.iter().map(|n| n.label.clone()).collect::<Vec<_>>()), before);
+        assert!(!refresh_facts(&mut old, d).iter().any(|_| true), "a second refresh has nothing to fill");
         assert_eq!(web1.params["key"], "lab");
         assert_eq!(web1.params["spot"], true);
         assert_eq!(web1.params["disk"], 50);

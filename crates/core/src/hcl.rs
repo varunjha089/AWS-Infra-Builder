@@ -250,6 +250,7 @@ pub fn generate_with(d: &Design, managed: &std::collections::HashSet<String>) ->
             let arch = instance_type(t).map(|x| x.3).unwrap_or("x86_64");
             let (ami, _, _) = ami_for(p(n, "os"), arch);
             let ami_ref = if p(n, "image_id").trim().is_empty() { format!("data.aws_ami.{ami}.id") } else { q(p(n, "image_id")) };
+            let adopted = !p(n, "aws_id").trim().is_empty();
             adopt(format!("aws_instance.{}", n.label), p(n, "aws_id"));
             let sub = n.parent.as_ref().map(|s| label(s)).unwrap_or_default();
             let sgs: Vec<String> = n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).filter(|id| d.node(id).is_some()).map(|id| format!("{}.id", sg_ref(id))).collect()).unwrap_or_default();
@@ -257,7 +258,9 @@ pub fn generate_with(d: &Design, managed: &std::collections::HashSet<String>) ->
             let spot = n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
             let disk = n.params.get("disk").and_then(|v| v.as_u64()).unwrap_or(8);
             let monthly = crate::pricing::instance_hourly(t, &d.region) * crate::pricing::HOURS * if spot { crate::pricing::SPOT_FACTOR } else { 1.0 };
-            m.push_str(&format!("\n# instance {} ({t}{}, about USD {monthly:.0} a month running)\nresource \"aws_instance\" \"{}\" {{\n  ami                         = {ami_ref}\n  instance_type               = {}\n  subnet_id                   = aws_subnet.{sub}.id\n  vpc_security_group_ids      = [{}]\n  associate_public_ip_address = {public}\n{}{}  root_block_device {{\n    volume_type = \"gp3\"\n    volume_size = {disk}\n  }}\n  metadata_options {{\n    http_tokens = \"required\"\n  }}\n{}}}\n",
+            // an adopted instance keeps the address setting it has (writing it would force a rebuild; an Elastic IP reads as false)
+            let public_line = if adopted { String::new() } else { format!("  associate_public_ip_address = {public}\n") };
+            m.push_str(&format!("\n# instance {} ({t}{}, about USD {monthly:.0} a month running)\nresource \"aws_instance\" \"{}\" {{\n  ami                         = {ami_ref}\n  instance_type               = {}\n  subnet_id                   = aws_subnet.{sub}.id\n  vpc_security_group_ids      = [{}]\n{public_line}{}{}  root_block_device {{\n    volume_type = \"gp3\"\n    volume_size = {disk}\n  }}\n  metadata_options {{\n    http_tokens = \"required\"\n  }}\n{}}}\n",
                 n.label, if spot { ", spot" } else { "" }, n.label, q(t), sgs.join(", "), if p(n, "key").trim().is_empty() { String::new() } else if !p(n, "aws_id").trim().is_empty() { format!("  key_name                    = {}\n", q(p(n, "key"))) } else { "  key_name                    = var.key_name\n".to_string() }
                     + &if p(n, "iam_profile").trim().is_empty() { String::new() } else { format!("  iam_instance_profile        = {}\n", q(p(n, "iam_profile"))) },
                 if spot { "  # spot: about 70 % cheaper; stopped (not terminated) when AWS takes the capacity back, so the volume and the work on it stay\n  instance_market_options {\n    market_type = \"spot\"\n    spot_options {\n      spot_instance_type             = \"persistent\"\n      instance_interruption_behavior = \"stop\"\n    }\n  }\n".to_string() } else { String::new() }, tags(n, &[])));
