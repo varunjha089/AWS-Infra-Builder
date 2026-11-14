@@ -2,7 +2,7 @@
 //! profile in ~/.aws (the SDK reads the files and handles SSO) or from the keys pasted into the app (handed to the SDK for one
 //! call at a time; they live in the keychain, see main.rs). Only Describe* and GetCallerIdentity are ever called here.
 
-use aib_core::import::{EndpointInfo, InstanceInfo, Inventory, NatInfo, PermInfo, RouteInfo, RouteTableInfo, SgInfo, SubnetInfo, VpcInfo};
+use aib_core::import::{EndpointInfo, InstanceInfo, Inventory, NatInfo, PermInfo, RouteInfo, RouteTableInfo, SgInfo, SgRuleInfo, SubnetInfo, VpcInfo};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_ec2::types::Filter;
 use serde::Serialize;
@@ -105,6 +105,7 @@ pub async fn inventory(creds: Creds, region: &str, vpc_id: &str, account: &str) 
         let nats = nats.nat_gateways().iter().map(|n| NatInfo {
             id: n.nat_gateway_id().unwrap_or("").into(), name: name_tag(n.tags()), subnet_id: n.subnet_id().unwrap_or("").into(),
             state: n.state().map(|s| s.as_str().to_string()).unwrap_or_default(),
+            allocation_id: n.nat_gateway_addresses().iter().find_map(|a| a.allocation_id()).map(String::from),
         }).collect();
         let rts = ec2.describe_route_tables().filters(by_vpc("vpc-id")).send().await.map_err(readable)?;
         let route_tables = rts.route_tables().iter().map(|r| RouteTableInfo {
@@ -127,6 +128,23 @@ pub async fn inventory(creds: Creds, region: &str, vpc_id: &str, account: &str) 
             groups: p.user_id_group_pairs().iter().filter_map(|g| g.group_id()).map(String::from).collect(),
         };
         let sgs = ec2.describe_security_groups().filters(by_vpc("vpc-id")).send().await.map_err(readable)?;
+        let sg_ids: Vec<String> = sgs.security_groups().iter().filter_map(|g| g.group_id()).map(String::from).collect();
+        // every rule with its id (an import block names the rule by it)
+        let mut sg_rules: Vec<SgRuleInfo> = vec![];
+        if !sg_ids.is_empty() {
+            let f = aws_sdk_ec2::types::Filter::builder().name("group-id").set_values(Some(sg_ids)).build();
+            let mut token: Option<String> = None;
+            loop {
+                let out = ec2.describe_security_group_rules().filters(f.clone()).set_next_token(token.clone()).send().await.map_err(readable)?;
+                sg_rules.extend(out.security_group_rules().iter().map(|r| SgRuleInfo {
+                    id: r.security_group_rule_id().unwrap_or("").into(), group_id: r.group_id().unwrap_or("").into(), egress: r.is_egress().unwrap_or(false),
+                    proto: r.ip_protocol().unwrap_or("-1").into(), from: r.from_port().unwrap_or(0), to: r.to_port().unwrap_or(0),
+                    cidr: r.cidr_ipv4().map(String::from), group: r.referenced_group_info().and_then(|g| g.group_id()).map(String::from),
+                }));
+                token = out.next_token().map(String::from);
+                if token.is_none() { break; }
+            }
+        }
         let sgs = sgs.security_groups().iter().map(|g| SgInfo {
             id: g.group_id().unwrap_or("").into(), name: name_tag(g.tags()), group_name: g.group_name().unwrap_or("").into(), description: g.description().unwrap_or("").into(),
             ingress: g.ip_permissions().iter().map(perm).collect(), egress: g.ip_permissions_egress().iter().map(perm).collect(),
@@ -137,6 +155,8 @@ pub async fn inventory(creds: Creds, region: &str, vpc_id: &str, account: &str) 
             subnet_id: i.subnet_id().unwrap_or("").into(), sgs: i.security_groups().iter().filter_map(|g| g.group_id()).map(String::from).collect(),
             public_ip: i.public_ip_address().is_some(), key: i.key_name().map(String::from), state: i.state().and_then(|s| s.name()).map(|n| n.as_str().to_string()).unwrap_or_default(),
             image_name: i.image_id().map(String::from),
+            image_id: i.image_id().map(String::from),
+            iam_profile: i.iam_instance_profile().and_then(|p| p.arn()).map(|a| a.rsplit('/').next().unwrap_or(a).to_string()),
             spot: i.instance_lifecycle().map(|l| l.as_str() == "spot").unwrap_or(false),
             disk: None,
             address: i.public_ip_address().map(String::from).or_else(|| i.public_dns_name().filter(|s| !s.is_empty()).map(String::from)),
@@ -152,13 +172,28 @@ pub async fn inventory(creds: Creds, region: &str, vpc_id: &str, account: &str) 
                 }
             }
         }
+        // the root volumes' sizes (one call): an adopted instance must not plan a smaller volume than it has
+        let roots: Vec<(String, String)> = res.reservations().iter().flat_map(|r| r.instances().iter()).filter_map(|i| {
+            let root = i.root_device_name()?;
+            let vol = i.block_device_mappings().iter().find(|b| b.device_name() == Some(root)).and_then(|b| b.ebs()).and_then(|e| e.volume_id())?;
+            Some((i.instance_id()?.to_string(), vol.to_string()))
+        }).collect();
+        if !roots.is_empty() {
+            if let Ok(vols) = ec2.describe_volumes().set_volume_ids(Some(roots.iter().map(|(_, v)| v.clone()).collect())).send().await {
+                for inst in instances.iter_mut() {
+                    if let Some((_, vid)) = roots.iter().find(|(i, _)| *i == inst.id) {
+                        inst.disk = vols.volumes().iter().find(|v| v.volume_id() == Some(vid.as_str())).and_then(|v| v.size()).map(|s| s as u64);
+                    }
+                }
+            }
+        }
         let eps = ec2.describe_vpc_endpoints().filters(by_vpc("vpc-id")).send().await.map_err(readable)?;
         let endpoints = eps.vpc_endpoints().iter().map(|e| EndpointInfo {
             id: e.vpc_endpoint_id().unwrap_or("").into(), name: name_tag(e.tags()), service_name: e.service_name().unwrap_or("").into(),
             endpoint_type: e.vpc_endpoint_type().map(|t| t.as_str().to_string()).unwrap_or_default(),
             route_table_ids: e.route_table_ids().to_vec(), subnet_ids: e.subnet_ids().to_vec(), sg_ids: e.groups().iter().filter_map(|g| g.group_id()).map(String::from).collect(),
         }).collect();
-        Ok(Inventory { region: region.into(), account: account.into(), vpc, subnets, igws, nats, route_tables, sgs, instances, endpoints })
+        Ok(Inventory { region: region.into(), account: account.into(), vpc, subnets, igws, nats, route_tables, sgs, instances, endpoints, sg_rules })
     }).await
 }
 

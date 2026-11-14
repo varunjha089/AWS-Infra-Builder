@@ -254,10 +254,26 @@ fn run(cx: &Ctx, args: &[&str], log: &Log, mut each: impl FnMut(&str, &Log)) -> 
     if status.success() { Ok(()) } else { Err(format!("tofu {} exited with {}", args.first().unwrap_or(&""), status.code().map(|c| c.to_string()).unwrap_or_else(|| "a signal".into()))) }
 }
 
+/// the ids of every resource the state file already holds: those are managed, an import block for them would fail
+pub fn managed_ids(work: &Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(text) = std::fs::read_to_string(work.join("terraform.tfstate")) else { return out };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return out };
+    for r in v["resources"].as_array().cloned().unwrap_or_default() {
+        for i in r["instances"].as_array().cloned().unwrap_or_default() {
+            if let Some(id) = i["attributes"]["id"].as_str() {
+                out.insert(id.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn write_code(cx: &Ctx) -> Result<(), String> {
     let w = work_dir(&cx.project);
     std::fs::create_dir_all(&w).map_err(|e| e.to_string())?;
-    hcl::write_to(&hcl::generate(&cx.design), &w).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(w.join("imports.tf")); // written again below only when something is left to adopt
+    hcl::write_to(&hcl::generate_with(&cx.design, &managed_ids(&w)), &w).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(store::home().join("plugin-cache")).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -370,6 +386,48 @@ pub fn apply(jobs: &Jobs, cx: Ctx, destroy: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// the adopt, for real: import the VPC named by AWS_INFRA_BUILDER_VPC (read-only), plan its untouched design, and expect
+    /// nothing created, replaced or destroyed: everything is adopted. Only with AWS_INFRA_BUILDER_REAL=1; plan only, never apply
+    #[test]
+    #[ignore]
+    fn real_plan_of_an_imported_vpc_adopts_everything() {
+        if std::env::var("AWS_INFRA_BUILDER_REAL").is_err() {
+            return;
+        }
+        let vpc_id = std::env::var("AWS_INFRA_BUILDER_VPC").expect("AWS_INFRA_BUILDER_VPC=<vpc id>");
+        let region = std::env::var("AWS_INFRA_BUILDER_REGION").unwrap_or_else(|_| "ap-south-1".into());
+        let t = tempfile::tempdir().unwrap();
+        std::env::set_var("AWS_INFRA_BUILDER_HOME", t.path().join("home"));
+        let tofu = locate().expect("OpenTofu installed");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let creds = crate::aws::Creds::Profile("default".into());
+        let identity = rt.block_on(crate::aws::identity(creds.clone(), &region)).unwrap();
+        let inv = rt.block_on(crate::aws::inventory(creds, &region, &vpc_id, &identity.account)).unwrap();
+        let imported = aib_core::import::to_design(&inv);
+        let mut design = imported.design;
+        aib_core::dsl::sync(&mut design);
+        println!("{}", design.text.clone().unwrap_or_default());
+        let project = t.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let jobs = Jobs::default();
+        plan(&jobs, Ctx { tofu, project: project.clone(), project_name: "adopt".into(), design: design.clone(), env: vec![("AWS_PROFILE".into(), "default".into())] }, false).unwrap();
+        let start = std::time::Instant::now();
+        while jobs.running() && start.elapsed().as_secs() < 900 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        let snap = jobs.snapshot(0);
+        println!("{}", snap.log.join("\n"));
+        assert_eq!(snap.state, "done", "{}", snap.message);
+        let p = snap.plan.expect("a plan summary");
+        println!("PLAN: {}", p.summary);
+        for c in &p.changes {
+            println!("  {} {} ({}){}", c.action, c.address, c.block_label.clone().unwrap_or_default(), if c.replace_because.is_empty() { String::new() } else { format!(" because {}", c.replace_because.join(", ")) });
+        }
+        assert!(p.imports > 0, "{}", p.summary);
+        assert_eq!((p.creates, p.replaces, p.destroys), (0, 0, 0), "{}", p.summary);
+        assert!(aib_core::plan::duplicates(&design, &p).is_empty());
+    }
 
     /// a real `tofu plan` of the cheapest template with the owner's default profile: read-only (plan creates nothing), only when
     /// asked for (AWS_INFRA_BUILDER_REAL=1); the project lives in a temp folder, OpenTofu must be installed

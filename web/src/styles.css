@@ -163,7 +163,7 @@ div.fixes .fix { margin: 6px 0; }
 .pill[class*="act-"] { background: var(--act); color: #fff; }
 tr[class*="act-"] td:first-child { border-left: 3px solid var(--act); }
 .react-flow__node[class*="plan-"] .box, .react-flow__node[class*="plan-"] .block { outline: 2px dashed var(--act); outline-offset: 3px; }
-.react-flow__node.plan-create { --act: #2e7d32; } .react-flow__node.plan-update { --act: #b26a00; } .react-flow__node.plan-replace { --act: #d2691e; } .react-flow__node.plan-destroy { --act: #c62828; }
+.react-flow__node.plan-import { --act: #15803d; } .react-flow__node.plan-create { --act: #2e7d32; } .react-flow__node.plan-update { --act: #b26a00; } .react-flow__node.plan-replace { --act: #d2691e; } .react-flow__node.plan-destroy { --act: #c62828; }
 .react-flow__node.mark-creating .box, .react-flow__node.mark-creating .block, .react-flow__node.mark-destroying .box, .react-flow__node.mark-destroying .block { outline: 2px dashed #2f6fde; outline-offset: 3px; animation: pulse 1s infinite alternate; }
 .react-flow__node.mark-created .box, .react-flow__node.mark-created .block { outline: 3px solid #2e7d32; outline-offset: 3px; }
 .react-flow__node.mark-failed .box, .react-flow__node.mark-failed .block { outline: 3px solid #c62828; outline-offset: 3px; }

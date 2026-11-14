@@ -24,7 +24,7 @@ export interface Identity { account: string; arn: string; user_id: string; regio
 export interface AwsState { profiles: Profile[]; aws_dir: string; source: Source; keys: { hint: string; temporary: boolean } | null; region: string | null; identity: Identity | null; policy: string }
 export interface VpcInfo { id: string; name: string | null; cidr: string; is_default: boolean; subnets: number }
 export interface Change { address: string; resource_type: string; name: string; action: string; block_id: string | null; block_label: string | null; replace_because: string[] }
-export interface PlanSummary { creates: number; updates: number; replaces: number; destroys: number; changes: Change[]; by_block: Record<string, string>; cost_delta: number; summary: string; empty: boolean }
+export interface PlanSummary { creates: number; imports: number; updates: number; replaces: number; destroys: number; changes: Change[]; by_block: Record<string, string>; cost_delta: number; summary: string; empty: boolean }
 export interface JobSnap { state: "idle" | "running" | "done" | "failed"; kind: string; log: string[]; next: number; message: string; plan: PlanSummary | null; outputs: [string, string][]; marks: Record<string, string>; aws_ids: Record<string, string>; started: number }
 export interface TofuStatus { tofu: string | null; version: string | null; install_version: string; source: string; identity: Identity | null; project_account: string | null; budget: number | null;
   state: { has_state: boolean; resources: number; last_apply: string | null; backups: number; plan_fresh: boolean; plan_destroy: boolean } }

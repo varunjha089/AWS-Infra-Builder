@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.7.3 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.8.0 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
 Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
@@ -32,8 +32,15 @@ storage) are messages on the block instead. 0.7.3: Lambda functions as a block k
 in the owner's time zone through EventBridge Scheduler, or custom Python; HCL with the archive provider, a role that may only
 do what the function does; free tier), "Schedule stop and start" on an instance adds the pair, and the real instance behind
 an imported or applied block can be stopped, started (the hourly price shown first) and refreshed from the inspector
-(ec2:Start/StopInstances: writes on the owner's click only, never in tests).
-Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
+(ec2:Start/StopInstances: writes on the owner's click only, never in tests). 0.8.0 (phase 4, adopt): a plan of an imported
+VPC adopts what exists instead of creating it again: the import records every id (rules, associations, EIP allocation, the
+instance's AMI and root volume), `imports.tf` carries an `import` block per block with an id that the state does not hold
+yet, an adopted instance keeps its AMI, AWS's default group is `aws_default_security_group`, an implicit main-table
+attachment writes no association; the plan counts "adopt N" and the app refuses an apply that would create a second copy of
+a block that carries an id. Verified with a real read-only plan of the owner's VPC: adopt 87, create 0, change 86 (tags and
+in-place settings), replace 0. Adopted groups keep their real name and description (both force a replacement), adopted
+instances their key pair and IAM instance profile.
+Still to come: RDS, reachability questions, import of balancers/groups, drift. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
 another account (account guard) or the estimate exceeds the project's budget without a tick (budget guard). The app draws VPCs, subnets, Internet/NAT Gateways, route tables, security groups with
@@ -112,7 +119,11 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            `s3 <name> [gb] [versioning] [lifecycle] [expire]`; `alb <name> internet|internal in <vpc> [tier] [sg] [port] [cert]
                            [health]`; `asg <name> <type> in <vpc> [tier] [min] [max] [desired] [sg] …`; `target <alb> -> <asg|ec2> <port>`. Only an
                            `rt` line has routes after `:` (ARNs hold colons).
-  hcl.rs                   generate(&Design) -> Files {main.tf, variables.tf, outputs.tf} for the AWS provider 5: aws_vpc, aws_subnet,
+  hcl.rs                   generate(&Design) = generate_with(design, managed ids) -> Files {main.tf, variables.tf, outputs.tf, imports.tf}:
+                           an `import { to, id }` block for every resource whose block carries an id the state does not manage yet (vpc,
+                           subnet, igw, nat + eip, route table, routes "rtb_dest", explicit associations "subnet/rtb", groups, every rule
+                           by its id, endpoints, instances); an instance with image_id uses it as `ami` (no data source); a group with
+                           aws_default is an aws_default_security_group; an implicit attachment writes no association. for the AWS provider 5: aws_vpc, aws_subnet,
                            aws_internet_gateway, aws_eip + aws_nat_gateway, aws_route_table/route/association, aws_security_group + one
                            aws_vpc_security_group_ingress_rule per arrow in (and egress rules, or the allow-all written down), data aws_ami per
                            OS × arch, aws_instance (gp3 root, IMDSv2); per lambda: data archive_file (the Python inline; stop/start code reads
@@ -123,7 +134,8 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            (needs tofu + the internet): `cargo test -p aib-core -- --ignored`; examples/dump_hcl.rs writes the templates for CI.
   templates.rs             TEMPLATES as .aib text (single_public, web_server, two_tier, three_tier, broken); build(key). The test checks
                            print(parse(t)) == t, so a template's text must be in print order
-  plan.rs                  parse_plan(design, `tofu show -json`) -> PlanSummary {creates, updates, replaces, destroys, changes, by_block
+  plan.rs                  parse_plan(design, `tofu show -json`) -> PlanSummary {creates, imports (change.importing: "adopt N" in the summary,
+                           action "import" on the block), updates, replaces, destroys, changes, by_block
                            (block id -> strongest action, by the design-block tag or the resource name), cost_delta (from pricing), summary};
                            parse_apply_line(design, one `-json` line) -> ApplyEvent {kind, message, block_id, aws_id, error}; parse_outputs.
                            Tested with hand-written JSON.
@@ -140,11 +152,13 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            public addresses. Analysis.cost carries it; blocks show their price.
   creds.rs                 profiles from ~/.aws/config + credentials (names, kind keys|sso|role|process, region, key hint; never a secret;
                            AWS_INFRA_BUILDER_AWS_DIR overrides the folder), Source {none | profile name | keys}, check_keys, read_only_policy()
-  import.rs                Inventory {vpc, subnets, igws, nats, route_tables with routes + associations, sgs with ingress/egress PermInfo,
-                           instances} -> Imported {design, notes}: tiers from the routes (0.0.0.0/0 -> igw public, -> nat private, else
+  import.rs                Inventory {vpc, subnets, igws, nats (+ allocation_id), route_tables with routes + associations, sgs with ingress/egress
+                           PermInfo, sg_rules (SgRuleInfo: every rule's id), instances (+ image_id, disk)} -> Imported {design, notes}: tiers from the routes (0.0.0.0/0 -> igw public, -> nat private, else
                            isolated), AZ letters from the AZ names, NATs in their subnet, main table drawn when a subnet uses it implicitly,
                            groups (egress "all" when AWS's allow-all is the only egress rule), one cidr block per range, a traffic arrow per
-                           permission (a mirrored pair once), instances with the OS guessed from the AMI name (deep learning [base],
+                           permission (a mirrored pair once; the rule's id on the arrow as aws_id / aws_id_out; the allow-all egress rule's id
+                           on the group as egress_rule_id; group_name "default" -> aws_default; a subnet on the main table by default -> the
+                           attach edge is `implicit`; the NAT's eip_alloc; the instance's image_id), instances with the OS guessed from the AMI name (deep learning [base],
                            openvpn, jammy/22.04, ubuntu, debian, else al2023) and their addresses
                            (params address = public IPv4 or DNS, private_ip; for the Terminal tab); what was left out is noted.
                            Tested with a hand-built inventory; the AWS calls are in the app.
@@ -154,14 +168,16 @@ app/src-tauri/src/term.rs  terminal sessions: portable-pty runs the system `ssh`
                            readable by others: ssh refuses those), fix_key_permissions (mode 600), ensure_dir (700), move_key_into(path,
                            dir) (rename, else copy + remove; never overwrites; 600), write_new_key(dir, name, material) (create_new,
                            0600). Tests: the key problems, the moves, and `sh -c echo` through a pty (no Tauri handle needed)
-app/src-tauri/src/tofu.rs  OpenTofu: locate() (settings tofu_path, <home>/bin/tofu, PATH, /opt/homebrew/bin; terraform too), install()
+app/src-tauri/src/tofu.rs  OpenTofu: managed_ids(work) (the ids in terraform.tfstate; those get no import block), locate() (settings tofu_path, <home>/bin/tofu, PATH, /opt/homebrew/bin; terraform too), install()
                            (official release zip for the OS/arch, SHA-256 checked against the published sums, unzipped into <home>/bin),
                            Jobs (one background job: JobSnap {state, kind, log, plan, outputs, marks block->creating/created/failed/
                            destroyed, aws_ids}), plan() (writes the HCL into <project>/tofu, init once with TF_PLUGIN_CACHE_DIR=<home>/
                            plugin-cache, plan -out=plan.tfplan [-destroy], show -json -> PlanSummary), apply() (refuses without a plan,
                            backs up terraform.tfstate to tofu/backups/<timestamp>, apply -json streamed, outputs), state_info().
                            Credentials only in the child's environment (AWS_PROFILE, or the three key variables). One `#[ignore]` real
-                           test plans the web_server template read-only (12 to add) with the default profile.
+                           test plans the web_server template read-only (12 to add) with the default profile; another
+                           (`real_plan_of_an_imported_vpc_adopts_everything`, AWS_INFRA_BUILDER_VPC=<id>) imports a VPC and expects its
+                           plan to adopt everything: 0 created, replaced or destroyed.
 app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sdk-ec2): Creds {Profile | Keys}, identity(), list_vpcs(), key_pairs(),
                            create_key_pair() (free), instance_states() (read-only), set_instance_power(id, on) (Start/StopInstances: the writes
                            outside Apply, on the owner's click only, never in tests),
@@ -170,7 +186,7 @@ app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sd
                            the default profile) prints the account's first VPC as .aib.
 app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load, save_design, design_from_text, design_arrange(sizes), design_tidy(id, sizes), design_fix(id | all_safe, sizes; my_ip() via ureq when the fix needs it; lays out again when blocks came or went), design_add(kind, parent, params: the dialog's type/os/hours onto the new block), instance_recommend(vcpu, ram, gpu, hours, region),
                            design_connect, design_remove, text_help, code, export_code, pick_folder, open_url; tofu_status, tofu_install,
-                           tofu_plan(destroy), tofu_apply(confirm, accept_budget) (guarded_ctx: live identity, account guard against
+                           tofu_plan(destroy), tofu_apply(confirm, accept_budget) (refused when plan::duplicates() names a block that would be created or replaced although it carries an id; guarded_ctx: live identity, account guard against
                            project.json "aws".account set by the first plan, region guard, budget guard), job_status(since),
                            project_set_budget, design_set_aws_ids (the created ids onto the blocks, and from the outputs the instances'
                            public/private addresses); hosts_state(design) {saved, suggested, ssh path}, hosts_save, key_check, key_fix,
@@ -209,7 +225,8 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
                            ec2 from the palette/menu opens it (Design.tsx add()). The inspector's type is a free input with the table as
                            suggestions (price when known) and the key field suggests the same names
   CodeTab.tsx              main.tf / variables.tf / outputs.tf from `code`, Copy, Export… (pick a folder)
-  PlanTab.tsx              OpenTofu status / Install, account guard and budget, Plan / Plan destroy, the change table, Apply or Destroy
+  PlanTab.tsx              OpenTofu status / Install, account guard and budget, Plan / Plan destroy, the change table ("adopt N" note; a red
+                           note and no Apply when the plan would duplicate a block that carries an id), Apply or Destroy
                            (typed project name when dangerous, budget tick), the live log, outputs. App.tsx polls job_status (startJob)
                            and passes the job to Design.tsx: plan-<action> / mark-<state> classes and a ribbon on each block, a legend
   TextTab.tsx              the .aib text with a line gutter; Apply (⌘↩) -> design_from_text; errors by line

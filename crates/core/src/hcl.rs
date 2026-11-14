@@ -40,9 +40,23 @@ fn ami_for(os: &str, arch: &str) -> (String, String, String) {
 }
 
 pub fn generate(d: &Design) -> Files {
+    generate_with(d, &std::collections::HashSet::new())
+}
+
+/// `managed` = the ids already in the state file: those get no import block (OpenTofu refuses to import what it manages)
+pub fn generate_with(d: &Design, managed: &std::collections::HashSet<String>) -> Files {
+    let mut imports: Vec<(String, String)> = vec![];
+    let mut adopt = |to: String, id: &str| {
+        let id = id.trim();
+        if !id.is_empty() && !managed.contains(id) && !imports.iter().any(|(t, _)| *t == to) {
+            imports.push((to, id.to_string()));
+        }
+    };
     let analysis = crate::checks::analyse(d);
     let project = slug(if d.name.trim().is_empty() { "aws-infra-builder" } else { &d.name });
     let label = |id: &str| d.node(id).map(|n| n.label.clone()).unwrap_or_else(|| "missing".into());
+    let group_ref = |g: &Node| format!("{}.{}", if g.params.get("aws_default").and_then(|v| v.as_bool()).unwrap_or(false) { "aws_default_security_group" } else { "aws_security_group" }, g.label);
+    let sg_ref = |id: &str| d.node(id).map(group_ref).unwrap_or_else(|| format!("aws_security_group.{}", label(id)));
     let tags = |n: &Node, extra: &[(&str, &str)]| -> String {
         let mut t = vec![format!("Name = \"${{var.project}}-{}\"", n.label), format!("\"design-block\" = {}", q(&n.label))];
         for (k, v) in extra {
@@ -67,7 +81,7 @@ pub fn generate(d: &Design) -> Files {
 
     // AMIs: one data source per OS × architecture in use
     let mut amis: BTreeMap<String, (String, String)> = BTreeMap::new();
-    for n in d.nodes.iter().filter(|n| n.kind == "ec2" || n.kind == "asg") {
+    for n in d.nodes.iter().filter(|n| (n.kind == "ec2" || n.kind == "asg") && p(n, "image_id").trim().is_empty()) {
         let arch = instance_type(p(n, "type")).map(|t| t.3).unwrap_or("x86_64");
         let (name, owner, pattern) = ami_for(p(n, "os"), arch);
         amis.insert(name, (owner, pattern));
@@ -77,26 +91,35 @@ pub fn generate(d: &Design) -> Files {
     }
 
     for v in d.nodes.iter().filter(|n| n.kind == "vpc") {
+        adopt(format!("aws_vpc.{}", v.label), p(v, "aws_id"));
         m.push_str(&format!("\n# ---- VPC {} ({})\nresource \"aws_vpc\" \"{}\" {{\n  cidr_block           = {}\n  enable_dns_support   = true\n  enable_dns_hostnames = true\n{}}}\n", v.label, p(v, "cidr"), v.label, q(p(v, "cidr")), tags(v, &[])));
         let kids: Vec<&Node> = d.descendants(&v.id).iter().skip(1).filter_map(|id| d.node(id)).collect();
         for s in kids.iter().filter(|n| n.kind == "subnet") {
+            adopt(format!("aws_subnet.{}", s.label), p(s, "aws_id"));
             m.push_str(&format!("\n# subnet {} ({} tier, AZ {})\nresource \"aws_subnet\" \"{}\" {{\n  vpc_id            = aws_vpc.{}.id\n  cidr_block        = {}\n  availability_zone = \"${{var.region}}{}\"\n  # public addresses are given per instance (each costs money), not to every instance of the subnet\n  map_public_ip_on_launch = false\n{}}}\n",
                 s.label, p(s, "tier"), p(s, "az"), s.label, v.label, q(p(s, "cidr")), p(s, "az"), tags(s, &[("tier", p(s, "tier"))])));
         }
         for g in kids.iter().filter(|n| n.kind == "igw") {
+            adopt(format!("aws_internet_gateway.{}", g.label), p(g, "aws_id"));
             m.push_str(&format!("\n# Internet Gateway {}\nresource \"aws_internet_gateway\" \"{}\" {{\n  vpc_id = aws_vpc.{}.id\n{}}}\n", g.label, g.label, v.label, tags(g, &[])));
         }
         let igw = kids.iter().find(|n| n.kind == "igw").map(|n| n.label.clone());
         for n in kids.iter().filter(|n| n.kind == "nat") {
             let sub = n.parent.as_ref().map(|s| label(s)).unwrap_or_default();
+            adopt(format!("aws_nat_gateway.{}", n.label), p(n, "aws_id"));
+            adopt(format!("aws_eip.{}", n.label), p(n, "eip_alloc"));
             m.push_str(&format!("\n# NAT Gateway {} in {} (about USD {:.0} a month idle: see the Costs tab)\nresource \"aws_eip\" \"{}\" {{\n  domain = \"vpc\"\n{}}}\n\nresource \"aws_nat_gateway\" \"{}\" {{\n  allocation_id = aws_eip.{}.id\n  subnet_id     = aws_subnet.{}.id\n{}{}}}\n",
                 n.label, sub, crate::pricing::nat_hourly(&d.region) * crate::pricing::HOURS, n.label, tags(n, &[]), n.label, n.label, sub,
                 igw.as_ref().map(|g| format!("  depends_on    = [aws_internet_gateway.{g}]\n")).unwrap_or_default(), tags(n, &[])));
         }
         for rt in kids.iter().filter(|n| n.kind == "rt") {
+            adopt(format!("aws_route_table.{}", rt.label), p(rt, "aws_id"));
             m.push_str(&format!("\n# route table {}\nresource \"aws_route_table\" \"{}\" {{\n  vpc_id = aws_vpc.{}.id\n{}}}\n", rt.label, rt.label, v.label, tags(rt, &[])));
             for (i, e) in d.edges.iter().filter(|e| e.kind == "route" && e.source == rt.id).enumerate() {
                 let Some(t) = d.node(&e.target) else { continue };
+                if !p(rt, "aws_id").is_empty() && matches!(t.kind.as_str(), "igw" | "nat") {
+                    adopt(format!("aws_route.{}_{i}", rt.label), &format!("{}_{}", p(rt, "aws_id"), e.params.get("dest").and_then(|v| v.as_str()).unwrap_or("0.0.0.0/0")));
+                }
                 let target = match t.kind.as_str() {
                     "igw" => format!("gateway_id             = aws_internet_gateway.{}.id", t.label),
                     "nat" => format!("nat_gateway_id         = aws_nat_gateway.{}.id", t.label),
@@ -105,29 +128,51 @@ pub fn generate(d: &Design) -> Files {
                 m.push_str(&format!("\nresource \"aws_route\" \"{}_{i}\" {{\n  route_table_id         = aws_route_table.{}.id\n  destination_cidr_block = {}\n  {target}\n}}\n", rt.label, rt.label, q(e.params.get("dest").and_then(|v| v.as_str()).unwrap_or("0.0.0.0/0"))));
             }
             for e in d.edges.iter().filter(|e| e.kind == "attach" && e.target == rt.id) {
+                if e.params.get("implicit").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    continue; // the subnet uses the VPC's main table by default: there is no association to write or adopt
+                }
                 let s = label(&e.source);
+                if let (Some(sn), false) = (d.node(&e.source), p(rt, "aws_id").is_empty()) {
+                    if !p(sn, "aws_id").is_empty() {
+                        adopt(format!("aws_route_table_association.{s}"), &format!("{}/{}", p(sn, "aws_id"), p(rt, "aws_id")));
+                    }
+                }
                 m.push_str(&format!("\nresource \"aws_route_table_association\" \"{s}\" {{\n  subnet_id      = aws_subnet.{s}.id\n  route_table_id = aws_route_table.{}.id\n}}\n", rt.label));
             }
         }
         for g in kids.iter().filter(|n| n.kind == "sg") {
             let desc = if p(g, "description").trim().is_empty() { format!("{} ({})", g.label, project) } else { p(g, "description").to_string() };
-            m.push_str(&format!("\n# security group {}\nresource \"aws_security_group\" \"{}\" {{\n  name        = \"${{var.project}}-{}\"\n  description = {}\n  vpc_id      = aws_vpc.{}.id\n{}}}\n", g.label, g.label, g.label, q(&desc), v.label, tags(g, &[])));
+            let is_default = g.params.get("aws_default").and_then(|v| v.as_bool()).unwrap_or(false);
+            let gtype = if is_default { "aws_default_security_group" } else { "aws_security_group" };
+            adopt(format!("{gtype}.{}", g.label), p(g, "aws_id"));
+            if is_default {
+                m.push_str(&format!("\n# the VPC's default security group (AWS makes it; this only manages its rules)\nresource \"aws_default_security_group\" \"{}\" {{\n  vpc_id = aws_vpc.{}.id\n{}}}\n", g.label, v.label, tags(g, &[])));
+            } else {
+                // an adopted group keeps its real name and description: both force a replacement when changed
+                let name = if p(g, "group_name").trim().is_empty() { format!("\"${{var.project}}-{}\"", g.label) } else { q(p(g, "group_name")) };
+                m.push_str(&format!("\n# security group {}\nresource \"aws_security_group\" \"{}\" {{\n  name        = {name}\n  description = {}\n  vpc_id      = aws_vpc.{}.id\n{}}}\n", g.label, g.label, q(&desc), v.label, tags(g, &[])));
+            };
             // ingress: every traffic arrow into the group
+            let gref = format!("{gtype}.{}", g.label);
             for (i, e) in d.edges.iter().filter(|e| e.kind == "traffic" && e.target == g.id).enumerate() {
                 let Some(src) = d.node(&e.source) else { continue };
-                m.push_str(&rule("ingress", &format!("{}_in_{i}", g.label), &g.label, src, e, &format!("in from {}", src.label)));
+                adopt(format!("aws_vpc_security_group_ingress_rule.{}_in_{i}", g.label), e.params.get("aws_id").and_then(|v| v.as_str()).unwrap_or(""));
+                m.push_str(&rule("ingress", &format!("{}_in_{i}", g.label), &gref, src, e, &format!("in from {}", src.label), &group_ref));
             }
             if p(g, "egress") == "rules" {
                 for (i, e) in d.edges.iter().filter(|e| e.kind == "traffic" && e.source == g.id).enumerate() {
                     let Some(dst) = d.node(&e.target) else { continue };
-                    m.push_str(&rule("egress", &format!("{}_out_{i}", g.label), &g.label, dst, e, &format!("out to {}", dst.label)));
+                    adopt(format!("aws_vpc_security_group_egress_rule.{}_out_{i}", g.label), e.params.get("aws_id_out").and_then(|v| v.as_str()).unwrap_or(""));
+                    m.push_str(&rule("egress", &format!("{}_out_{i}", g.label), &gref, dst, e, &format!("out to {}", dst.label), &group_ref));
                 }
             } else {
-                m.push_str(&format!("\n# {}: everything out (AWS's default; the provider removes it unless it is written down)\nresource \"aws_vpc_security_group_egress_rule\" \"{}_out_all\" {{\n  security_group_id = aws_security_group.{}.id\n  ip_protocol       = \"-1\"\n  cidr_ipv4         = \"0.0.0.0/0\"\n}}\n", g.label, g.label, g.label));
+                adopt(format!("aws_vpc_security_group_egress_rule.{}_out_all", g.label), p(g, "egress_rule_id"));
+                m.push_str(&format!("\n# {}: everything out (AWS's default; the provider removes it unless it is written down)\nresource \"aws_vpc_security_group_egress_rule\" \"{}_out_all\" {{\n  security_group_id = {gref}.id\n  ip_protocol       = \"-1\"\n  cidr_ipv4         = \"0.0.0.0/0\"\n}}\n", g.label, g.label));
             }
         }
         for ep in kids.iter().filter(|n| n.kind == "vpce") {
             let svc = p(ep, "service");
+            adopt(format!("aws_vpc_endpoint.{}", ep.label), p(ep, "aws_id"));
             if crate::model::endpoint_type(svc) == Some("gateway") {
                 let tables: Vec<String> = d.edges.iter().filter(|e| e.kind == "route" && e.target == ep.id).filter_map(|e| d.node(&e.source)).map(|t| format!("aws_route_table.{}.id", t.label)).collect();
                 m.push_str(&format!("\n# gateway endpoint {} for {} (free): the route tables get a route to the service's prefix list\nresource \"aws_vpc_endpoint\" \"{}\" {{\n  vpc_id            = aws_vpc.{}.id\n  service_name      = \"com.amazonaws.${{var.region}}.{svc}\"\n  vpc_endpoint_type = \"Gateway\"\n  route_table_ids   = [{}]\n{}}}\n", ep.label, svc, ep.label, v.label, tables.join(", "), tags(ep, &[])));
@@ -143,7 +188,7 @@ pub fn generate(d: &Design) -> Files {
             let arch = instance_type(t).map(|x| x.3).unwrap_or("x86_64");
             let (ami, _, _) = ami_for(p(g, "os"), arch);
             let subs: Vec<String> = kids.iter().filter(|n| n.kind == "subnet" && p(n, "tier") == p(g, "tier")).map(|s| format!("aws_subnet.{}.id", s.label)).collect();
-            let sgs: Vec<String> = g.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).filter(|id| d.node(id).is_some()).map(|id| format!("aws_security_group.{}.id", label(id))).collect()).unwrap_or_default();
+            let sgs: Vec<String> = g.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).filter(|id| d.node(id).is_some()).map(|id| format!("{}.id", sg_ref(id))).collect()).unwrap_or_default();
             let spot = g.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
             let disk = g.params.get("disk").and_then(|v| v.as_u64()).unwrap_or(8);
             let num = |k: &str, dflt: u64| g.params.get(k).and_then(|v| v.as_u64()).unwrap_or(dflt);
@@ -178,14 +223,17 @@ pub fn generate(d: &Design) -> Files {
             let t = p(n, "type");
             let arch = instance_type(t).map(|x| x.3).unwrap_or("x86_64");
             let (ami, _, _) = ami_for(p(n, "os"), arch);
+            let ami_ref = if p(n, "image_id").trim().is_empty() { format!("data.aws_ami.{ami}.id") } else { q(p(n, "image_id")) };
+            adopt(format!("aws_instance.{}", n.label), p(n, "aws_id"));
             let sub = n.parent.as_ref().map(|s| label(s)).unwrap_or_default();
-            let sgs: Vec<String> = n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).filter(|id| d.node(id).is_some()).map(|id| format!("aws_security_group.{}.id", label(id))).collect()).unwrap_or_default();
+            let sgs: Vec<String> = n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).filter(|id| d.node(id).is_some()).map(|id| format!("{}.id", sg_ref(id))).collect()).unwrap_or_default();
             let public = n.params.get("public_ip").and_then(|v| v.as_bool()).unwrap_or(false);
             let spot = n.params.get("spot").and_then(|v| v.as_bool()).unwrap_or(false);
             let disk = n.params.get("disk").and_then(|v| v.as_u64()).unwrap_or(8);
             let monthly = crate::pricing::instance_hourly(t, &d.region) * crate::pricing::HOURS * if spot { crate::pricing::SPOT_FACTOR } else { 1.0 };
-            m.push_str(&format!("\n# instance {} ({t}{}, about USD {monthly:.0} a month running)\nresource \"aws_instance\" \"{}\" {{\n  ami                         = data.aws_ami.{ami}.id\n  instance_type               = {}\n  subnet_id                   = aws_subnet.{sub}.id\n  vpc_security_group_ids      = [{}]\n  associate_public_ip_address = {public}\n{}{}  root_block_device {{\n    volume_type = \"gp3\"\n    volume_size = {disk}\n  }}\n  metadata_options {{\n    http_tokens = \"required\"\n  }}\n{}}}\n",
-                n.label, if spot { ", spot" } else { "" }, n.label, q(t), sgs.join(", "), if p(n, "key").trim().is_empty() { String::new() } else { "  key_name                    = var.key_name\n".to_string() },
+            m.push_str(&format!("\n# instance {} ({t}{}, about USD {monthly:.0} a month running)\nresource \"aws_instance\" \"{}\" {{\n  ami                         = {ami_ref}\n  instance_type               = {}\n  subnet_id                   = aws_subnet.{sub}.id\n  vpc_security_group_ids      = [{}]\n  associate_public_ip_address = {public}\n{}{}  root_block_device {{\n    volume_type = \"gp3\"\n    volume_size = {disk}\n  }}\n  metadata_options {{\n    http_tokens = \"required\"\n  }}\n{}}}\n",
+                n.label, if spot { ", spot" } else { "" }, n.label, q(t), sgs.join(", "), if p(n, "key").trim().is_empty() { String::new() } else if !p(n, "aws_id").trim().is_empty() { format!("  key_name                    = {}\n", q(p(n, "key"))) } else { "  key_name                    = var.key_name\n".to_string() }
+                    + &if p(n, "iam_profile").trim().is_empty() { String::new() } else { format!("  iam_instance_profile        = {}\n", q(p(n, "iam_profile"))) },
                 if spot { "  # spot: about 70 % cheaper; stopped (not terminated) when AWS takes the capacity back, so the volume and the work on it stay\n  instance_market_options {\n    market_type = \"spot\"\n    spot_options {\n      spot_instance_type             = \"persistent\"\n      instance_interruption_behavior = \"stop\"\n    }\n  }\n".to_string() } else { String::new() }, tags(n, &[])));
         }
     }
@@ -294,11 +342,18 @@ pub fn generate(d: &Design) -> Files {
     files.insert("main.tf".into(), m);
     files.insert("variables.tf".into(), v);
     files.insert("outputs.tf".into(), o);
+    if !imports.is_empty() {
+        let mut t = String::from("# imports.tf: generated by AWS Infra Builder. These resources already exist (the design was imported, or carries their ids):\n# the first apply adopts them into the state instead of creating them again. Nothing is created or changed by an import block.\n");
+        for (to, id) in &imports {
+            t.push_str(&format!("\nimport {{\n  to = {to}\n  id = {}\n}}\n", q(id)));
+        }
+        files.insert("imports.tf".into(), t);
+    }
     files
 }
 
 /// one ingress or egress rule from a traffic arrow; `other` is the group or address range at the far end
-fn rule(dir: &str, name: &str, group: &str, other: &Node, e: &crate::model::Edge, comment: &str) -> String {
+fn rule(dir: &str, name: &str, group: &str, other: &Node, e: &crate::model::Edge, comment: &str, group_ref: &dyn Fn(&Node) -> String) -> String {
     let proto = e.params.get("proto").and_then(|v| v.as_str()).unwrap_or("tcp").to_lowercase();
     let ports = e.params.get("ports").and_then(|v| v.as_str()).unwrap_or("");
     let (ip_protocol, port_lines) = match proto.as_str() {
@@ -313,9 +368,9 @@ fn rule(dir: &str, name: &str, group: &str, other: &Node, e: &crate::model::Edge
     let far = if other.kind == "cidr" {
         format!("  cidr_ipv4         = {}\n", q(p(other, "cidr")))
     } else {
-        format!("  referenced_security_group_id = aws_security_group.{}.id\n", other.label)
+        format!("  referenced_security_group_id = {}.id\n", group_ref(other))
     };
-    format!("\n# {group}: {comment}\nresource \"aws_vpc_security_group_{dir}_rule\" \"{name}\" {{\n  security_group_id = aws_security_group.{group}.id\n  ip_protocol       = {}\n{port_lines}{far}}}\n", q(&ip_protocol))
+    format!("\n# {comment}\nresource \"aws_vpc_security_group_{dir}_rule\" \"{name}\" {{\n  security_group_id = {group}.id\n  ip_protocol       = {}\n{port_lines}{far}}}\n", q(&ip_protocol))
 }
 
 /// write the files into a folder (made if missing)

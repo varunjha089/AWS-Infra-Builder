@@ -565,6 +565,10 @@ async fn tofu_apply(st: State<'_, App>, confirm: String, accept_budget: bool) ->
         return Err("The design changed since the plan: run Plan again.".into());
     }
     let destroy = snap.kind == "plan-destroy";
+    let dup = aib_core::plan::duplicates(&cx.design, &plan);
+    if !destroy && !dup.is_empty() {
+        return Err(format!("Not applied: this plan would create a second copy of {} (they already exist in AWS; the design carries their ids), and you would pay twice. Run Plan again: the import blocks adopt them instead. If a block was replaced, see why in the plan table.", dup.join(", ")));
+    }
     if (plan.destroys > 0 || plan.replaces > 0) && confirm.trim() != cx.project_name {
         return Err(format!("This would destroy {} and replace {} resources: type the project's name ({}) to allow it.", plan.destroys, plan.replaces, cx.project_name));
     }

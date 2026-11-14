@@ -21,6 +21,8 @@ export function PlanTab({ st, design, analysis, job, startJob, toast, goDesign }
   const havePlan = status.state.plan_fresh && plan && (job?.state === "done") && (planKind === "plan" || planKind === "plan-destroy");
   const isDestroyPlan = planKind === "plan-destroy";
   const dangerous = !!plan && (plan.destroys > 0 || plan.replaces > 0);
+  /** blocks the plan would create although they already exist in AWS (they carry an id): the app refuses to apply that */
+  const duplicates = plan ? Array.from(new Set(plan.changes.filter((c) => (c.action === "create" || c.action === "replace") && c.block_id && design.nodes.find((n) => n.id === c.block_id && n.params.aws_id)).map((c) => c.block_label ?? c.address))) : [];
   const projectName = st.project?.name ?? "";
   const estimatedAfter = analysis.cost.total;
   const overBudget = !!status.budget && estimatedAfter > status.budget && !isDestroyPlan;
@@ -80,11 +82,13 @@ export function PlanTab({ st, design, analysis, job, startJob, toast, goDesign }
         {!havePlan && <p className="muted">Run Plan first; the plan is used as saved, so what you saw is what runs.</p>}
         {havePlan && plan && !plan.empty && (
           <>
+            {plan.imports > 0 && <div className="msg info">{plan.imports} resource{plan.imports === 1 ? "" : "s"} already in the account {plan.imports === 1 ? "is" : "are"} adopted into the state (import blocks): nothing is created for them and nothing changes on them by that alone.</div>}
+            {duplicates.length > 0 && <div className="msg error">This plan would create a second copy of {duplicates.join(", ")}: they already exist in AWS and the design carries their ids. Apply is refused; run Plan again so the import blocks adopt them, or look at the plan table for a replace and its reason.</div>}
             {dangerous && <div className="msg warn">This {isDestroyPlan ? "destroys" : "replaces or destroys"} resources ({plan.destroys} destroyed, {plan.replaces} replaced). Type the project's name, <strong>{projectName}</strong>, to allow it.
               <div className="row"><input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={projectName} /></div></div>}
             {overBudget && <label className="row chk"><input type="checkbox" checked={acceptBudget} onChange={(e) => setAcceptBudget(e.target.checked)} />The estimate (USD {estimatedAfter.toFixed(2)}) is above the budget (USD {status.budget}); apply anyway</label>}
             <div className="row">
-              <button className={isDestroyPlan ? "danger" : "primary"} disabled={!canApply} onClick={() => go(api.tofuApply(typed, acceptBudget))}>{isDestroyPlan ? "Destroy" : "Apply"}: {plan.summary.split(" · ")[0]}</button>
+              <button className={isDestroyPlan ? "danger" : "primary"} disabled={!canApply || (!isDestroyPlan && duplicates.length > 0)} onClick={() => go(api.tofuApply(typed, acceptBudget))}>{isDestroyPlan ? "Destroy" : "Apply"}: {plan.summary.split(" · ")[0]}</button>
               <span className="muted small">{usd(plan.cost_delta)} a month (estimate)</span>
             </div>
           </>

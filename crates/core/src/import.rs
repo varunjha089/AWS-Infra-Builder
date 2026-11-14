@@ -32,6 +32,22 @@ pub struct NatInfo {
     pub name: Option<String>,
     pub subnet_id: String,
     pub state: String,
+    /// the Elastic IP's allocation id (for the import block of aws_eip)
+    #[serde(default)]
+    pub allocation_id: Option<String>,
+}
+
+/// one security group rule as AWS lists it (ec2:DescribeSecurityGroupRules): its id is what an import block needs
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SgRuleInfo {
+    pub id: String,
+    pub group_id: String,
+    pub egress: bool,
+    pub proto: String,
+    pub from: i32,
+    pub to: i32,
+    pub cidr: Option<String>,
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -94,6 +110,12 @@ pub struct InstanceInfo {
     pub address: Option<String>,
     #[serde(default)]
     pub private_ip: Option<String>,
+    /// the AMI it runs: an adopted instance plans against this, not the newest image by name
+    #[serde(default)]
+    pub image_id: Option<String>,
+    /// the IAM instance profile's name, kept on an adopted instance
+    #[serde(default)]
+    pub iam_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -109,6 +131,8 @@ pub struct Inventory {
     pub sgs: Vec<SgInfo>,
     #[serde(default)]
     pub instances: Vec<InstanceInfo>,
+    #[serde(default)]
+    pub sg_rules: Vec<SgRuleInfo>,
     #[serde(default)]
     pub endpoints: Vec<EndpointInfo>,
 }
@@ -203,7 +227,7 @@ pub fn to_design(inv: &Inventory) -> Imported {
         let Some(parent) = subnet_node.get(&n.subnet_id) else { notes.push(format!("NAT Gateway {} is in a subnet the VPC does not list; left out.", n.id)); continue };
         let nid = id();
         gw_node.insert(n.id.clone(), nid.clone());
-        d.nodes.push(Node { id: nid, kind: "nat".into(), label: unique(label_for(&n.name, &n.id, "nat")), params: obj(json!({"aws_id": n.id})), parent: Some(parent.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+        d.nodes.push(Node { id: nid, kind: "nat".into(), label: unique(label_for(&n.name, &n.id, "nat")), params: obj(json!({"aws_id": n.id, "eip_alloc": n.allocation_id.clone().unwrap_or_default()})), parent: Some(parent.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
     }
     let mut en = 1;
     for rt in &inv.route_tables {
@@ -218,7 +242,8 @@ pub fn to_design(inv: &Inventory) -> Imported {
         let fallback = if rt.main { "main_rt" } else { "rt" };
         d.nodes.push(Node { id: nid.clone(), kind: "rt".into(), label: unique(label_for(&rt.name, &rt.id, fallback)), params: obj(json!({"aws_id": rt.id, "main": rt.main})), parent: Some(vpc_id.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
         for s in used_by {
-            d.edges.push(Edge { id: format!("e{en}"), source: s, target: nid.clone(), kind: "attach".into(), params: Params::new() });
+            let is_implicit = implicit.iter().any(|x| subnet_node.get(&x.id) == Some(&s));
+            d.edges.push(Edge { id: format!("e{en}"), source: s, target: nid.clone(), kind: "attach".into(), params: if is_implicit { obj(json!({"implicit": true})) } else { Params::new() } });
             en += 1;
         }
         if rt.main && !implicit.is_empty() {
@@ -242,8 +267,14 @@ pub fn to_design(inv: &Inventory) -> Imported {
         let egress_all = g.egress.len() == 1 && g.egress[0].proto == "-1" && g.egress[0].cidrs.iter().any(|c| c == "0.0.0.0/0") && g.egress[0].groups.is_empty();
         let want = if g.group_name == "default" { "default".to_string() } else { g.name.clone().unwrap_or_else(|| g.group_name.clone()) };
         d.nodes.push(Node { id: nid, kind: "sg".into(), label: unique(label_for(&Some(want), &g.id, "sg")),
-            params: obj(json!({"egress": if egress_all { "all" } else { "rules" }, "description": g.description, "aws_id": g.id})), parent: Some(vpc_id.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+            params: obj(json!({"egress": if egress_all { "all" } else { "rules" }, "description": g.description, "aws_id": g.id, "aws_default": g.group_name == "default", "group_name": g.group_name,
+                "egress_rule_id": inv.sg_rules.iter().find(|r| r.group_id == g.id && r.egress && r.proto == "-1" && r.cidr.as_deref() == Some("0.0.0.0/0")).map(|r| r.id.clone()).unwrap_or_default()})),
+            parent: Some(vpc_id.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
     }
+    // the id of one rule, by what it says
+    let rule_id = |group: &str, egress: bool, p: &PermInfo, cidr: Option<&str>, other: Option<&str>| -> Option<String> {
+        inv.sg_rules.iter().find(|r| r.group_id == group && r.egress == egress && r.proto == p.proto && (r.proto == "-1" || (r.from == p.from && r.to == p.to)) && r.cidr.as_deref() == cidr && r.group.as_deref() == other).map(|r| r.id.clone())
+    };
     let mut cidr_node: HashMap<String, String> = HashMap::new();
     let mut cidr_block = |d: &mut Design, c: &str, unique: &mut dyn FnMut(String) -> String, id: &mut dyn FnMut() -> String| -> String {
         if let Some(n) = cidr_node.get(c) {
@@ -266,22 +297,28 @@ pub fn to_design(inv: &Inventory) -> Imported {
         let me = sg_node[&g.id].clone();
         let egress_all = d.node(&me).map(|n| n.params.get("egress").and_then(|v| v.as_str()) == Some("all")).unwrap_or(true);
         // one arrow stands for both ends of a rule: an egress permission that mirrors an ingress one already drawn is not drawn again
-        let mut push = |d: &mut Design, src: String, tgt: String, p: &PermInfo| {
+        // `rid` is the rule's id in AWS: on the arrow as aws_id (the ingress rule) or aws_id_out (the egress rule at the source)
+        let mut push = |d: &mut Design, src: String, tgt: String, p: &PermInfo, rid: Option<String>, egress: bool| {
             let (proto, ports) = ports_of(p);
-            if d.edges.iter().any(|e| e.kind == "traffic" && e.source == src && e.target == tgt && e.params.get("proto").and_then(|v| v.as_str()) == Some(&proto) && e.params.get("ports").and_then(|v| v.as_str()) == Some(&ports)) {
+            let key = if egress { "aws_id_out" } else { "aws_id" };
+            if let Some(e) = d.edges.iter_mut().find(|e| e.kind == "traffic" && e.source == src && e.target == tgt && e.params.get("proto").and_then(|v| v.as_str()) == Some(&proto) && e.params.get("ports").and_then(|v| v.as_str()) == Some(&ports)) {
+                if let Some(r) = rid { e.params.insert(key.into(), json!(r)); }
                 return;
             }
-            d.edges.push(Edge { id: format!("e{en}"), source: src, target: tgt, kind: "traffic".into(), params: obj(json!({"proto": proto, "ports": ports})) });
+            let mut params = obj(json!({"proto": proto, "ports": ports}));
+            if let Some(r) = rid { params.insert(key.into(), json!(r)); }
+            d.edges.push(Edge { id: format!("e{en}"), source: src, target: tgt, kind: "traffic".into(), params });
             en += 1;
         };
         for p in &g.ingress {
             for c in &p.cidrs {
                 let src = cidr_block(&mut d, c, &mut unique, &mut id);
-                push(&mut d, src, me.clone(), p);
+                let rid = rule_id(&g.id, false, p, Some(c), None);
+                push(&mut d, src, me.clone(), p, rid, false);
             }
             for other in &p.groups {
                 match sg_node.get(other) {
-                    Some(src) => push(&mut d, src.clone(), me.clone(), p),
+                    Some(src) => { let rid = rule_id(&g.id, false, p, None, Some(other)); push(&mut d, src.clone(), me.clone(), p, rid, false) }
                     None => notes.push(format!("{}: a rule references group {other}, which is not in this VPC; left out.", g.group_name)),
                 }
             }
@@ -290,11 +327,13 @@ pub fn to_design(inv: &Inventory) -> Imported {
             for p in &g.egress {
                 for c in &p.cidrs {
                     let tgt = cidr_block(&mut d, c, &mut unique, &mut id);
-                    push(&mut d, me.clone(), tgt, p);
+                    let rid = rule_id(&g.id, true, p, Some(c), None);
+                    push(&mut d, me.clone(), tgt, p, rid, true);
                 }
                 for other in &p.groups {
                     if let Some(tgt) = sg_node.get(other) {
-                        push(&mut d, me.clone(), tgt.clone(), p);
+                        let rid = rule_id(&g.id, true, p, None, Some(other));
+                        push(&mut d, me.clone(), tgt.clone(), p, rid, true);
                     }
                 }
             }
@@ -313,7 +352,7 @@ pub fn to_design(inv: &Inventory) -> Imported {
         let sgs: Vec<String> = i.sgs.iter().filter_map(|g| sg_node.get(g).cloned()).collect();
         let nid = id();
         d.nodes.push(Node { id: nid, kind: "ec2".into(), label: unique(label_for(&i.name, &i.id, "instance")),
-            params: obj(json!({"type": i.instance_type, "os": os, "key": i.key.clone().unwrap_or_default(), "public_ip": i.public_ip, "sgs": sgs, "aws_id": i.id, "state": i.state, "spot": i.spot, "disk": i.disk.unwrap_or(8), "address": i.address.clone().unwrap_or_default(), "private_ip": i.private_ip.clone().unwrap_or_default()})),
+            params: obj(json!({"type": i.instance_type, "os": os, "key": i.key.clone().unwrap_or_default(), "public_ip": i.public_ip, "sgs": sgs, "aws_id": i.id, "state": i.state, "spot": i.spot, "disk": i.disk.unwrap_or(8), "address": i.address.clone().unwrap_or_default(), "private_ip": i.private_ip.clone().unwrap_or_default(), "image_id": i.image_id.clone().unwrap_or_default(), "iam_profile": i.iam_profile.clone().unwrap_or_default()})),
             parent: Some(parent.clone()), x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
         if i.state == "stopped" {
             notes.push(format!("Instance {} is stopped: it costs only its volume and public address until started.", i.name.clone().unwrap_or(i.id.clone())));
@@ -362,6 +401,10 @@ mod tests {
     fn inventory() -> Inventory {
         Inventory {
             region: "ap-south-1".into(),
+            sg_rules: vec![
+                SgRuleInfo { id: "sgr-web443".into(), group_id: "sg-web".into(), egress: false, proto: "tcp".into(), from: 443, to: 443, cidr: Some("0.0.0.0/0".into()), group: None },
+                SgRuleInfo { id: "sgr-webout".into(), group_id: "sg-web".into(), egress: true, proto: "-1".into(), from: 0, to: 0, cidr: Some("0.0.0.0/0".into()), group: None },
+            ],
             account: "123456789012".into(),
             vpc: VpcInfo { id: "vpc-0abc".into(), name: Some("Prod VPC".into()), cidr: "10.0.0.0/16".into(), is_default: false, subnets: 4 },
             subnets: vec![
@@ -371,8 +414,8 @@ mod tests {
                 SubnetInfo { id: "subnet-4".into(), name: Some("db".into()), cidr: "10.0.64.0/24".into(), az: "ap-south-1c".into(), map_public_ip: false },
             ],
             igws: vec![("igw-9".into(), None)],
-            nats: vec![NatInfo { id: "nat-7".into(), name: Some("nat a".into()), subnet_id: "subnet-1".into(), state: "available".into() },
-                       NatInfo { id: "nat-8".into(), name: None, subnet_id: "subnet-2".into(), state: "deleted".into() }],
+            nats: vec![NatInfo { id: "nat-7".into(), name: Some("nat a".into()), subnet_id: "subnet-1".into(), state: "available".into(), allocation_id: Some("eipalloc-7".into()) },
+                       NatInfo { id: "nat-8".into(), name: None, subnet_id: "subnet-2".into(), state: "deleted".into(), allocation_id: None }],
             sgs: vec![
                 SgInfo { id: "sg-web".into(), name: Some("web".into()), group_name: "prod-web".into(), description: "web".into(),
                     ingress: vec![PermInfo { proto: "tcp".into(), from: 443, to: 443, cidrs: vec!["0.0.0.0/0".into()], groups: vec![] }, PermInfo { proto: "tcp".into(), from: 22, to: 22, cidrs: vec!["203.0.113.0/24".into()], groups: vec![] }],
@@ -388,9 +431,9 @@ mod tests {
                     egress: vec![PermInfo { proto: "-1".into(), from: 0, to: 0, cidrs: vec!["0.0.0.0/0".into()], groups: vec![] }] },
             ],
             instances: vec![
-                InstanceInfo { id: "i-1".into(), name: Some("web 1".into()), instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec!["sg-web".into()], public_ip: true, key: Some("lab".into()), state: "running".into(), image_name: Some("ubuntu/images/hvm-ssd/ubuntu-jammy".into()), spot: true, disk: Some(50), address: Some("3.7.1.2".into()), private_ip: Some("10.0.0.5".into()) },
-                InstanceInfo { id: "i-2".into(), name: None, instance_type: "x9.odd".into(), subnet_id: "subnet-3".into(), sgs: vec!["sg-db".into()], public_ip: false, key: None, state: "stopped".into(), image_name: None, spot: false, disk: None, address: None, private_ip: None },
-                InstanceInfo { id: "i-3".into(), name: None, instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec![], public_ip: false, key: None, state: "terminated".into(), image_name: None, spot: false, disk: None, address: None, private_ip: None },
+                InstanceInfo { id: "i-1".into(), name: Some("web 1".into()), instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec!["sg-web".into()], public_ip: true, key: Some("lab".into()), state: "running".into(), image_name: Some("ubuntu/images/hvm-ssd/ubuntu-jammy".into()), spot: true, disk: Some(50), address: Some("3.7.1.2".into()), private_ip: Some("10.0.0.5".into()), image_id: Some("ami-0web".into()), iam_profile: Some("web-role".into()) },
+                InstanceInfo { id: "i-2".into(), name: None, instance_type: "x9.odd".into(), subnet_id: "subnet-3".into(), sgs: vec!["sg-db".into()], public_ip: false, key: None, state: "stopped".into(), image_name: None, spot: false, disk: None, address: None, private_ip: None, image_id: None, iam_profile: None },
+                InstanceInfo { id: "i-3".into(), name: None, instance_type: "t3.micro".into(), subnet_id: "subnet-1".into(), sgs: vec![], public_ip: false, key: None, state: "terminated".into(), image_name: None, spot: false, disk: None, address: None, private_ip: None, image_id: None, iam_profile: None },
             ],
             endpoints: vec![
                 EndpointInfo { id: "vpce-1".into(), name: Some("s3 endpoint".into()), service_name: "com.amazonaws.ap-south-1.s3".into(), endpoint_type: "Gateway".into(), route_table_ids: vec!["rtb-app".into()], subnet_ids: vec![], sg_ids: vec![] },
@@ -439,6 +482,24 @@ mod tests {
         assert_eq!(web1.params["os"], "ubuntu22");
         assert_eq!(web1.params["public_ip"], true);
         assert_eq!(web1.params["address"], "3.7.1.2");
+        assert_eq!(web1.params["image_id"], "ami-0web");
+        // the ids an adopt needs: the rule's id on its arrow, the allow-all egress rule's id on the group, the EIP allocation
+        let web_sg = d.by_label("web").or_else(|| d.nodes.iter().find(|n| n.kind == "sg" && n.params["aws_id"] == "sg-web")).unwrap();
+        assert_eq!(web_sg.params["egress_rule_id"], "sgr-webout");
+        assert!(d.edges.iter().any(|e| e.kind == "traffic" && e.target == web_sg.id && e.params.get("aws_id").and_then(|v| v.as_str()) == Some("sgr-web443")), "{:?}", d.edges);
+        assert_eq!(d.nodes.iter().find(|n| n.kind == "nat").unwrap().params["eip_alloc"], "eipalloc-7");
+        // the subnet on the main table by default is an implicit attachment: no association resource, nothing to import
+        let main_rt = d.nodes.iter().find(|n| n.kind == "rt" && n.params["main"] == true).unwrap();
+        assert!(d.edges.iter().any(|e| e.kind == "attach" && e.target == main_rt.id && e.params.get("implicit") == Some(&json!(true))));
+        let files = crate::hcl::generate(d);
+        let imports = &files["imports.tf"];
+        for s in ["to = aws_vpc.prod_vpc\n  id = \"vpc-0abc\"", "to = aws_vpc_security_group_ingress_rule.", "id = \"sgr-web443\"", "id = \"sgr-webout\"", "to = aws_eip.", "id = \"eipalloc-7\"", "to = aws_instance.web_1\n  id = \"i-1\"", "id = \"subnet-1/rtb-pub\""] {
+            assert!(imports.contains(s), "missing {s}\n{imports}");
+        }
+        assert!(files["main.tf"].contains("ami                         = \"ami-0web\""), "the adopted instance keeps its image");
+        assert!(files["main.tf"].contains("iam_instance_profile        = \"web-role\"") && files["main.tf"].contains("key_name                    = \"lab\""), "{}", files["main.tf"]);
+        assert!(files["main.tf"].contains("name        = \"web\"") || files["main.tf"].contains("name        = \"prod-web\""), "the group keeps its real name: {}", files["main.tf"]);
+        assert!(!files["main.tf"].contains("resource \"aws_route_table_association\" \"db\""), "an implicit attachment writes no association");
         assert_eq!(web1.params["key"], "lab");
         assert_eq!(web1.params["spot"], true);
         assert_eq!(web1.params["disk"], 50);

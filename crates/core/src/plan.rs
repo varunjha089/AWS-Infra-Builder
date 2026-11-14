@@ -27,6 +27,9 @@ pub struct Change {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlanSummary {
     pub creates: usize,
+    /// resources adopted from the account (import blocks): nothing is created for them
+    #[serde(default)]
+    pub imports: usize,
     pub updates: usize,
     pub replaces: usize,
     pub destroys: usize,
@@ -42,7 +45,7 @@ pub struct PlanSummary {
 }
 
 fn rank(a: &str) -> u8 {
-    match a { "destroy" => 4, "replace" => 3, "update" => 2, "create" => 1, _ => 0 }
+    match a { "destroy" => 5, "replace" => 4, "update" => 3, "create" => 2, "import" => 1, _ => 0 }
 }
 
 fn action_of(actions: &[Value]) -> String {
@@ -72,9 +75,15 @@ pub fn parse_plan(d: &Design, show_json: &str) -> Result<PlanSummary, String> {
     let v: Value = serde_json::from_str(show_json).map_err(|e| format!("the plan is not JSON: {e}"))?;
     let mut s = PlanSummary::default();
     for rc in v["resource_changes"].as_array().cloned().unwrap_or_default() {
-        let action = action_of(rc["change"]["actions"].as_array().map(|a| a.as_slice()).unwrap_or(&[]));
+        let mut action = action_of(rc["change"]["actions"].as_array().map(|a| a.as_slice()).unwrap_or(&[]));
         if rc["mode"].as_str() == Some("data") || action == "read" {
             continue;
+        }
+        if rc["change"]["importing"].is_object() {
+            s.imports += 1;
+            if action == "no-op" {
+                action = "import".into();
+            }
         }
         let name = rc["name"].as_str().unwrap_or("").to_string();
         let block = block_for(d, &rc, &name);
@@ -96,7 +105,7 @@ pub fn parse_plan(d: &Design, show_json: &str) -> Result<PlanSummary, String> {
             block_id: block.map(|b| b.id.clone()), block_label: block.map(|b| b.label.clone()), replace_because });
     }
     s.changes.retain(|c| c.action != "no-op");
-    s.empty = s.creates + s.updates + s.replaces + s.destroys == 0;
+    s.empty = s.creates + s.updates + s.replaces + s.destroys + s.imports == 0;
     // cost: the monthly price of the blocks that appear (create) minus those that go (destroy), by the design's own estimate
     let cost = pricing::cost(d);
     let price = |id: &str| cost.items.iter().filter(|i| i.id == id).map(|i| i.monthly).sum::<f64>();
@@ -110,9 +119,21 @@ pub fn parse_plan(d: &Design, show_json: &str) -> Result<PlanSummary, String> {
     s.summary = if s.empty {
         "No changes: the account already matches the design.".into()
     } else {
-        format!("create {}, change {}, replace {}, destroy {} · {}{:.2} USD/month", s.creates, s.updates, s.replaces, s.destroys, if s.cost_delta >= 0.0 { "+" } else { "−" }, s.cost_delta.abs())
+        format!("{}create {}, change {}, replace {}, destroy {} · {}{:.2} USD/month", if s.imports > 0 { format!("adopt {}, ", s.imports) } else { String::new() }, s.creates, s.updates, s.replaces, s.destroys, if s.cost_delta >= 0.0 { "+" } else { "−" }, s.cost_delta.abs())
     };
     Ok(s)
+}
+
+/// the blocks a plan would create or replace although they already exist in AWS (they carry an id): applying it would make a
+/// second copy and pay twice. The Plan tab refuses such an apply
+pub fn duplicates(d: &Design, s: &PlanSummary) -> Vec<String> {
+    let mut out: Vec<String> = s.changes.iter().filter(|c| c.action == "create" || c.action == "replace")
+        .filter_map(|c| c.block_id.as_ref().and_then(|id| d.node(id)))
+        .filter(|n| !n.params.get("aws_id").and_then(|v| v.as_str()).unwrap_or("").is_empty())
+        .map(|n| n.label.clone()).collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// one line of `tofu apply -json` / `tofu plan -json`, turned into a log line and, when a resource finished, the block it belongs to
@@ -218,6 +239,17 @@ mod tests {
         assert!(parse_apply_line(&d, "   ").is_none());
         let route = parse_apply_line(&d, r#"{"@message":"aws_route.public_0: Creating...","type":"apply_start","hook":{"resource":{"addr":"aws_route.public_0","resource_name":"public_0"}}}"#).unwrap();
         assert_eq!(route.block_id.as_deref(), Some(d.by_label("public").unwrap().id.as_str()));
+        // an import block shows as "importing" with no-op (or update when something differs): counted as adopt, never create
+        let d = crate::dsl::parse("net \"a\"\nregion ap-south-1\nazs 1\n\nvpc main 10.0.0.0/16\nsubnet a public 10.0.0.0/24 az a in main\n", None).map(|mut d| { d.node_mut(&d.by_label("main").unwrap().id.clone()).unwrap().params.insert("aws_id".into(), serde_json::json!("vpc-1")); d }).unwrap();
+        let p = parse_plan(&d, r#"{"resource_changes":[
+            {"address":"aws_vpc.main","mode":"managed","type":"aws_vpc","name":"main","change":{"actions":["no-op"],"importing":{"id":"vpc-1"},"after":{"tags":{"design-block":"main"}}}},
+            {"address":"aws_subnet.a","mode":"managed","type":"aws_subnet","name":"a","change":{"actions":["create"],"after":{"tags":{"design-block":"a"}}}}]}"#).unwrap();
+        assert_eq!((p.imports, p.creates), (1, 1));
+        assert!(p.summary.starts_with("adopt 1, create 1"), "{}", p.summary);
+        assert_eq!(p.by_block[&d.by_label("main").unwrap().id], "import");
+        assert!(duplicates(&d, &p).is_empty(), "the subnet is new: no id, no duplicate");
+        let p2 = parse_plan(&d, r#"{"resource_changes":[{"address":"aws_vpc.main","mode":"managed","type":"aws_vpc","name":"main","change":{"actions":["create"],"after":{"tags":{"design-block":"main"}}}}]}"#).unwrap();
+        assert_eq!(duplicates(&d, &p2), vec!["main".to_string()]);
         let outs = parse_outputs(r#"{"vpc_main_id":{"sensitive":false,"type":"string","value":"vpc-0abc"},"subnet_ids":{"value":{"public_a":"subnet-1"}}}"#);
         assert_eq!(outs[1], ("vpc_main_id".to_string(), "vpc-0abc".to_string()));
         assert!(outs[0].1.contains("subnet-1"));
