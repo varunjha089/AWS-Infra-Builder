@@ -230,6 +230,42 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                     l.params.insert("versioning".into(), json!(true));
                     rest.remove(i);
                 }
+                "stop" | "start" if kw == "lambda" => {
+                    let action = rest[i].to_string();
+                    match rest.get(i + 1) {
+                        Some(list) if !list.is_empty() => {
+                            l.params.insert("action".into(), json!(action));
+                            l.sgs = list.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+                            rest.drain(i..i + 2);
+                        }
+                        _ => { errors.push(err(ln, "stop/start: name the instances, such as `stop web_1,db_1`")); break; }
+                    }
+                }
+                "at" if kw == "lambda" => {
+                    match rest.get(i + 1) {
+                        Some(t) if crate::checks::valid_time(t) => { l.params.insert("time".into(), json!(t)); rest.drain(i..i + 2); }
+                        _ => { errors.push(err(ln, "at: a time of day as HH:MM, such as `at 19:00`")); break; }
+                    }
+                }
+                "days" if kw == "lambda" => {
+                    match rest.get(i + 1).copied() {
+                        Some(dd @ ("weekdays" | "daily" | "weekends")) => { l.params.insert("days".into(), json!(dd)); rest.drain(i..i + 2); }
+                        _ => { errors.push(err(ln, "days: weekdays, daily or weekends")); break; }
+                    }
+                }
+                "tz" if kw == "lambda" => {
+                    match rest.get(i + 1) {
+                        Some(z) if z.contains('/') || *z == "UTC" => { l.params.insert("tz".into(), json!(z)); rest.drain(i..i + 2); }
+                        _ => { errors.push(err(ln, "tz: a zone name such as Asia/Kolkata or UTC")); break; }
+                    }
+                }
+                "memory" | "timeout" if kw == "lambda" => {
+                    let key = rest[i].to_string();
+                    match rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                        Some(n) => { l.params.insert(key, json!(n)); rest.drain(i..i + 2); }
+                        _ => { errors.push(err(ln, "memory / timeout: a number (MB; seconds)")); break; }
+                    }
+                }
                 "spot" if kw == "ec2" || kw == "asg" => {
                     l.params.insert("spot".into(), json!(true));
                     rest.remove(i);
@@ -322,6 +358,14 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
                     errors.push(err(ln, format!("s3: unexpected \"{}\"; the form is `s3 <name> [gb <GB>] [versioning] [lifecycle none|ia-30|glacier-90|ia-30-glacier-90] [expire <days>]`", positional.join(" "))));
                 }
             }
+            "lambda" => {
+                for (k, v) in [("runtime", json!("python3.12")), ("memory", json!(128)), ("timeout", json!(30)), ("action", json!("custom")), ("instances", json!([])), ("time", json!("")), ("days", json!("weekdays")), ("tz", json!("Asia/Kolkata")), ("code", json!(""))] {
+                    l.params.entry(k).or_insert(v);
+                }
+                if !positional.is_empty() {
+                    errors.push(err(ln, format!("lambda: unexpected \"{}\"; the form is `lambda <name> [stop|start <instances,…>] [at HH:MM] [days weekdays|daily|weekends] [tz <zone>] [memory <MB>] [timeout <s>]`", positional.join(" "))));
+                }
+            }
             "cidr" => match positional.as_slice() {
                 [c] => { l.params.insert("cidr".into(), json!(c)); }
                 _ => errors.push(err(ln, "cidr: `cidr <name> <range>`, such as `cidr internet 0.0.0.0/0`")),
@@ -377,7 +421,7 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
         }
         for g in &l.sgs {
             if !label_ok(g) {
-                errors.push(err(l.line, format!("there is no security group called \"{g}\"")));
+                errors.push(err(l.line, format!("there is no {} called \"{g}\"", if l.kind == "lambda" { "instance" } else { "security group" })));
             }
         }
     }
@@ -435,6 +479,10 @@ pub fn parse(text: &str, base: Option<&Design>) -> Result<Design, Vec<TextError>
         if l.kind == "ec2" || l.kind == "asg" {
             let sgs: Vec<String> = l.sgs.iter().map(|g| ids[g].clone()).collect();
             d.node_mut(&id).unwrap().params.insert("sgs".into(), json!(sgs));
+        }
+        if l.kind == "lambda" {
+            let inst: Vec<String> = l.sgs.iter().map(|g| ids[g].clone()).collect();
+            d.node_mut(&id).unwrap().params.insert("instances".into(), json!(inst));
         }
         if l.kind == "vpce" || l.kind == "alb" {
             let sg = l.sgs.first().map(|g| ids[g].clone()).unwrap_or_default();
@@ -557,6 +605,17 @@ pub fn print(d: &Design) -> String {
                 if let Some(e) = n.params.get("expire_days").and_then(|v| v.as_u64()).filter(|e| *e > 0) { s.push_str(&format!(" expire {e}")); }
                 s
             }
+            "lambda" => {
+                let mut s = format!("lambda {}", n.label);
+                let inst: Vec<String> = n.params.get("instances").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).map(label).collect()).unwrap_or_default();
+                if matches!(p(n, "action").as_str(), "stop" | "start") && !inst.is_empty() { s.push_str(&format!(" {} {}", p(n, "action"), inst.join(","))); }
+                if !p(n, "time").is_empty() { s.push_str(&format!(" at {}", p(n, "time"))); }
+                if !p(n, "days").is_empty() && p(n, "days") != "weekdays" { s.push_str(&format!(" days {}", p(n, "days"))); }
+                if !p(n, "tz").is_empty() && p(n, "tz") != "Asia/Kolkata" { s.push_str(&format!(" tz {}", p(n, "tz"))); }
+                if let Some(m) = n.params.get("memory").and_then(|v| v.as_u64()).filter(|m| *m != 128) { s.push_str(&format!(" memory {m}")); }
+                if let Some(t) = n.params.get("timeout").and_then(|v| v.as_u64()).filter(|t| *t != 30) { s.push_str(&format!(" timeout {t}")); }
+                s
+            }
             "sg" => format!("sg {}{place}{}", n.label, if p(n, "egress") == "rules" { " egress rules" } else { "" }),
             "ec2" => {
                 let sgs: Vec<String> = n.params.get("sgs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).map(label).collect()).unwrap_or_default();
@@ -643,6 +702,7 @@ pub fn help() -> Vec<(String, String)> {
         ("ec2 <name> <type> in <subnet> [sg a,b] [key <pair>] [public] [spot] [disk <GiB>] [hours <n>] [os al2023|ubuntu|debian]".into(), "an instance; public = a public IPv4 address (costs money); spot = about 70 % cheaper, may be interrupted; hours = how many hours a month it runs (730 = always on), the price follows it".into()),
         ("cidr <name> <range>".into(), "an address range outside the design, such as `cidr internet 0.0.0.0/0`".into()),
         ("vpce <name> <service> in <vpc> [tier <tier>] [sg <group>]".into(), "a VPC endpoint: s3 and dynamodb are free gateway endpoints (route `pl-s3 -> name` from a table); the rest are interface endpoints in the tier's subnets".into()),
+        ("lambda <name> [stop|start <instances,…>] [at HH:MM] [days weekdays|daily|weekends] [tz <zone>] [memory <MB>] [timeout <s>]".into(), "a Lambda function: stops or starts instances on a schedule (free tier); without stop/start it runs the custom code set in the inspector".into()),
         ("s3 <name> [gb <GB>] [versioning] [lifecycle ia-30|glacier-90|ia-30-glacier-90] [expire <days>]".into(), "a bucket with public access blocked and encryption on; gb is for the estimate".into()),
         ("alb <name> <internet|internal> in <vpc> [tier t] [sg g] [port 80|443] [cert <ACM arn>] [health /path]".into(), "an Application Load Balancer in the tier's subnets (two AZs); HTTPS when a certificate is named".into()),
         ("asg <name> <type> in <vpc> [tier t] [min n] [max n] [desired n] [sg a,b] [key k] [spot] [disk n] [hours n] [os x]".into(), "an Auto Scaling group of instances in the tier's subnets".into()),

@@ -209,6 +209,10 @@ pub fn cost(d: &Design) -> CostReport {
                 }
             }
         }
+        if n.kind == "lambda" {
+            items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly: 0.0,
+                note: "free tier: 1,000,000 requests and 400,000 GB-seconds a month; a daily schedule uses a few hundred. The schedule itself is free".into() });
+        }
         if n.kind == "s3" {
             let monthly = s3_monthly(n);
             items.push(CostItem { id: n.id.clone(), label: n.label.clone(), kind: n.kind.clone(), monthly,

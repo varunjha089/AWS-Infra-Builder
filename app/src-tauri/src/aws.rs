@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::time::Duration;
 
 /// the credentials for one call
+#[derive(Clone)]
 pub enum Creds {
     Profile(String),
     Keys { id: String, secret: String, token: Option<String> },
@@ -218,5 +219,43 @@ pub async fn create_key_pair(creds: Creds, region: &str, name: &str) -> Result<S
         let conf = config(creds, region).await;
         let out = aws_sdk_ec2::Client::new(&conf).create_key_pair().key_name(name).key_type(KeyType::Ed25519).key_format(KeyFormat::Pem).send().await.map_err(readable)?;
         out.key_material().map(String::from).filter(|m| !m.is_empty()).ok_or_else(|| "AWS returned no key material.".to_string())
+    }).await
+}
+
+// ---------------------------------------------------------------- instances: state, start, stop (the inspector's buttons)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstanceState {
+    pub id: String,
+    pub state: String,
+    pub address: Option<String>,
+    pub private_ip: Option<String>,
+}
+
+/// the running state (and current addresses) of these instances; ec2:DescribeInstances, read-only
+pub async fn instance_states(creds: Creds, region: &str, ids: Vec<String>) -> Result<Vec<InstanceState>, String> {
+    with_timeout(async {
+        let conf = config(creds, region).await;
+        let out = aws_sdk_ec2::Client::new(&conf).describe_instances().set_instance_ids(Some(ids)).send().await.map_err(readable)?;
+        Ok(out.reservations().iter().flat_map(|r| r.instances().iter()).map(|i| InstanceState {
+            id: i.instance_id().unwrap_or("").into(),
+            state: i.state().and_then(|s| s.name()).map(|n| n.as_str().to_string()).unwrap_or_default(),
+            address: i.public_ip_address().map(String::from).or_else(|| i.public_dns_name().filter(|s| !s.is_empty()).map(String::from)),
+            private_ip: i.private_ip_address().map(String::from),
+        }).collect())
+    }).await
+}
+
+/// start (costs the hourly price from then on) or stop (only the volume and address are charged) one instance, on the
+/// owner's click only; never called by a test
+pub async fn set_instance_power(creds: Creds, region: &str, id: &str, on: bool) -> Result<(), String> {
+    with_timeout(async {
+        let conf = config(creds, region).await;
+        let ec2 = aws_sdk_ec2::Client::new(&conf);
+        if on {
+            ec2.start_instances().instance_ids(id).send().await.map_err(readable)?;
+        } else {
+            ec2.stop_instances().instance_ids(id).send().await.map_err(readable)?;
+        }
+        Ok(())
     }).await
 }

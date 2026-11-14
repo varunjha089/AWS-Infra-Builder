@@ -91,6 +91,7 @@ pub const KINDS: &[(&str, &str, &str)] = &[
     ("s3", "S3 bucket", ""),
     ("alb", "Load balancer", "vpc"),
     ("asg", "Auto Scaling group", "vpc"),
+    ("lambda", "Lambda function", ""),
 ];
 
 /// (service, title, "gateway" | "interface"): gateway endpoints are free and route through the route table; interface endpoints
@@ -244,6 +245,8 @@ pub fn defaults(kind: &str) -> Params {
         "vpce" => json!({"service": "s3", "tier": "private", "sg": ""}),
         // public access blocked and encryption on always; `gb` is only for the estimate; lifecycle moves old objects to cheaper storage
         "s3" => json!({"versioning": false, "lifecycle": "none", "expire_days": 0, "gb": 10}),
+        // a function that stops or starts instances on a schedule (free tier), or custom Python; time "" = no schedule
+        "lambda" => json!({"runtime": "python3.12", "memory": 128, "timeout": 30, "action": "stop", "instances": [], "time": "19:00", "days": "weekdays", "tz": "Asia/Kolkata", "code": ""}),
         // an internet-facing ALB in the public subnets; HTTP on 80 until a certificate (ACM ARN) is named, then HTTPS on 443
         "alb" => json!({"scheme": "internet", "tier": "public", "sg": "", "port": 80, "cert": "", "health": "/"}),
         // the cheapest type, two instances in the private subnets, scaling to four

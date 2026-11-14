@@ -93,6 +93,12 @@ fn routes_of_subnet<'a>(d: &'a Design, subnet: &str) -> Option<(&'a Node, Vec<(&
     Some((rt, routes))
 }
 
+/// "HH:MM", 24-hour
+pub fn valid_time(t: &str) -> bool {
+    let Some((h, m)) = t.split_once(':') else { return false };
+    h.len() == 2 && m.len() == 2 && h.parse::<u8>().map(|h| h < 24).unwrap_or(false) && m.parse::<u8>().map(|m| m < 60).unwrap_or(false)
+}
+
 pub fn analyse(d: &Design) -> Analysis {
     let mut cx = Ctx { status: HashMap::new(), msgs: HashMap::new() };
     let mut info: HashMap<String, Vec<String>> = HashMap::new();
@@ -621,6 +627,54 @@ pub fn analyse(d: &Design) -> Analysis {
     }
 
     // ---- S3 buckets
+    // ---- Lambda functions: what they act on, the schedule, the limits AWS has
+    let stoppers: Vec<&Node> = d.nodes.iter().filter(|n| n.kind == "lambda" && p(n, "action") == "stop").collect();
+    for f in d.nodes.iter().filter(|n| n.kind == "lambda") {
+        let action = p(f, "action");
+        let inst: Vec<String> = f.params.get("instances").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).map(String::from).collect()).unwrap_or_default();
+        let names: Vec<String> = inst.iter().filter_map(|id| d.node(id)).map(|n| n.label.clone()).collect();
+        if inst.iter().any(|id| d.node(id).map(|n| n.kind != "ec2").unwrap_or(true)) {
+            cx.error(&f.id, "An instance this function acts on is no longer in the design: untick it.".to_string());
+        }
+        if matches!(action, "stop" | "start") && inst.is_empty() {
+            cx.warn(&f.id, format!("Tick the instances to {action}: the function does nothing yet."));
+        }
+        let time = p(f, "time");
+        if !time.is_empty() && !valid_time(time) {
+            cx.error(&f.id, format!("\"{time}\" is not a time of day: write HH:MM, such as 19:00."));
+        }
+        if time.is_empty() {
+            if matches!(action, "stop" | "start") {
+                cx.warn(&f.id, "No schedule: set a time of day, else the function only runs when called by hand.".to_string());
+            } else {
+                info.entry(f.id.clone()).or_default().push("No schedule: the function runs when called (console, CLI, or another service).".into());
+            }
+        }
+        let memory = f.params.get("memory").and_then(|v| v.as_f64()).unwrap_or(128.0);
+        if !(128.0..=10240.0).contains(&memory) {
+            cx.error(&f.id, format!("Memory is {memory} MB; Lambda allows 128 to 10240."));
+        }
+        let timeout = f.params.get("timeout").and_then(|v| v.as_f64()).unwrap_or(30.0);
+        if !(1.0..=900.0).contains(&timeout) {
+            cx.error(&f.id, format!("Timeout is {timeout} s; Lambda allows 1 to 900."));
+        }
+        let runs = match p(f, "days") { "daily" => 30, "weekends" => 8, _ => 22 };
+        info.entry(f.id.clone()).or_default().push(format!("Free: Lambda's free tier is 1,000,000 requests and 400,000 GB-seconds a month and the schedule (EventBridge Scheduler) is free too; this runs about {runs} times a month.{}", if matches!(action, "stop" | "start") { " A stopped instance pays only for its volume and address." } else { "" }));
+        summary.insert(f.id.clone(), if matches!(action, "stop" | "start") {
+            format!("{action} {}{}", if names.is_empty() { "nothing yet".to_string() } else { names.join(", ") }, if time.is_empty() { String::new() } else { format!(" · {time} {} ({})", p(f, "days"), p(f, "tz")) })
+        } else {
+            format!("custom Python{}", if time.is_empty() { String::new() } else { format!(" · {time} {}", p(f, "days")) })
+        });
+    }
+    // an instance priced for part of the month should really be stopped the rest of it
+    for n in d.nodes.iter().filter(|n| n.kind == "ec2") {
+        let hours = pricing::hours_of(n);
+        let scheduled = stoppers.iter().any(|f| f.params.get("instances").and_then(|v| v.as_array()).map(|a| a.iter().any(|v| v.as_str() == Some(&n.id))).unwrap_or(false));
+        if hours < pricing::HOURS && !scheduled {
+            info.entry(n.id.clone()).or_default().push(format!("Priced for {hours:.0} h a month: that holds only if it is stopped the rest of the time. \"Schedule stop and start\" below adds the Lambda functions that do it."));
+        }
+    }
+
     for b in d.nodes.iter().filter(|n| n.kind == "s3") {
         let gb = b.params.get("gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let life = p(b, "lifecycle");

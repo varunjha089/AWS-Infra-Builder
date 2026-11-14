@@ -12,7 +12,7 @@ import { Num } from "./Num";
 import { cidrText, nextFree, parseCidr, size } from "./cidr";
 import { neon, useTheme } from "./theme";
 
-export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569", vpce: "#0f766e", s3: "#15803d", alb: "#9333ea", asg: "#a16207" };
+export const COLORS: Record<string, string> = { vpc: "#e07b00", subnet: "#2f6fde", public: "#2e7d32", private: "#2f6fde", isolated: "#6b7280", igw: "#7c3aed", nat: "#0e7490", rt: "#8e5bb5", sg: "#c0392b", ec2: "#b7791f", cidr: "#475569", vpce: "#0f766e", s3: "#15803d", alb: "#9333ea", asg: "#a16207", lambda: "#be185d" };
 const CONTAINER = (kind: string) => kind === "vpc" || kind === "subnet";
 
 type Data = { node: DNode; result?: NodeResult; azName: string; plan?: string; mark?: string };
@@ -212,6 +212,32 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
   const [keyFiles, setKeyFiles] = useState<string[]>([]);
   useEffect(() => { if (newInst) api.keysList().then((k) => setKeyFiles(k.keys.map((f) => f.name.replace(/\.(pem|key)$/, "")))).catch(() => {}); }, [newInst]);
   const keyNames = Array.from(new Set([...keyFiles, ...design.nodes.filter((n) => n.kind === "ec2" || n.kind === "asg").map((n) => String(n.params.key ?? "")).filter(Boolean)]));
+  const [armed, setArmed] = useState<string | null>(null);
+  const [powerBusy, setPowerBusy] = useState(false);
+  const hourlyOf = (t: string) => { const it = st.instance_types.find((x) => x.type === t); return it ? (design.region === "us-east-1" ? it.us_east_1 : design.region === "ap-south-1" ? it.ap_south_1 : it.us_east_1 * 1.1) : 0; };
+  /** Refresh (null), Start (true) or Stop (false) the real instance behind a block; the state and addresses come back onto the block */
+  const power = (n: DNode, on: boolean | null) => {
+    const id = String(n.params.aws_id ?? "");
+    if (!id) return;
+    setPowerBusy(true); setArmed(null);
+    (on === null ? api.awsInstanceState([id], design.region) : api.awsInstancePower(id, on, design.region)).then((states) => {
+      const s = states.find((x) => x.id === id);
+      if (!s) { toast(`${id} was not found in ${design.region}.`); return; }
+      change({ ...design, nodes: design.nodes.map((x) => (x.id === n.id ? { ...x, params: { ...x.params, state: s.state, address: s.address ?? "", private_ip: s.private_ip ?? "" } } : x)) }, false);
+      toast(on === null ? `${n.label}: ${s.state}` : on ? `${n.label} is starting (${s.state}). It costs USD ${hourlyOf(String(n.params.type ?? "")).toFixed(4)} an hour until stopped; the address may be new.` : `${n.label} is stopping (${s.state}). Only its volume${n.params.public_ip ? " and address" : ""} are charged now.`);
+    }).catch((e) => toast(errText(e))).finally(() => setPowerBusy(false));
+  };
+  /** two Lambda functions that stop the instance in the evening and start it in the morning, weekdays */
+  const schedule = (n: DNode) => {
+    api.designAdd(design, "lambda", null, { action: "stop", instances: [n.id], time: "19:00" }).then((l1) =>
+      api.designAdd(l1.design, "lambda", null, { action: "start", instances: [n.id], time: "09:00" }).then((l2) => {
+        const stopId = l1.id, startId = l2.id;
+        const d = { ...l2.design, nodes: l2.design.nodes.map((x) => (x.id === stopId ? { ...x, label: `stop_${n.label}` } : x.id === startId ? { ...x, label: `start_${n.label}` } : x)) };
+        change(d, false);
+        if (startId) setSelectId(startId);
+        toast(`stop_${n.label} (19:00) and start_${n.label} (09:00), weekdays, Asia/Kolkata. Change the times, days or zone on each.`);
+      })).catch((e) => toast(errText(e)));
+  };
   const pickInstance = (c: Pick) => {
     const minDisk = st.os.find((o) => o.key === c.os)?.min_disk ?? 8;
     if (newInst === "change" && selectId) {
@@ -289,6 +315,7 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
         <button className="pal" style={pal("cidr")} onClick={() => add("cidr")}>Address range<small>the internet, your office IP</small></button>
         <h4>Data</h4>
         <button className="pal" style={pal("s3")} onClick={() => add("s3")}>S3 bucket<small>public access blocked, encrypted</small></button>
+        <button className="pal" style={pal("lambda")} onClick={() => add("lambda")}>Lambda function<small>stops or starts instances on a schedule; or your own code. Free tier</small></button>
         <h4>Compute</h4>
         <button className="pal" style={pal("ec2")} onClick={() => add("ec2")}>EC2 instance<small>cheapest type by default, no public IP</small></button>
         <button className="pal" style={pal("asg")} onClick={() => add("asg")}>Auto Scaling group<small>instances in a tier; Spot is safe here</small></button>
@@ -370,6 +397,28 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
                   const cur = Array.isArray(selected.params.sgs) ? (selected.params.sgs as string[]) : [];
                   return <label key={g.id} className="inline"><input type="checkbox" checked={cur.includes(g.id)} onChange={(e) => setParam(selected.id, "sgs", e.target.checked ? [...cur, g.id] : cur.filter((x) => x !== g.id), false)} />{g.label}</label>; })}</div>
               </>}
+              {selected.kind === "lambda" && <>
+                <label>What it does<select value={String(selected.params.action ?? "stop")} onChange={(e) => setParam(selected.id, "action", e.target.value, false)}>
+                  <option value="stop">stop instances</option><option value="start">start instances</option><option value="custom">custom Python code</option></select></label>
+                {String(selected.params.action ?? "stop") !== "custom" && <div>Instances<div className="small muted">{design.nodes.filter((n) => n.kind === "ec2").length === 0 && "none in the design yet"}</div>
+                  {design.nodes.filter((n) => n.kind === "ec2").map((n) => {
+                    const cur = Array.isArray(selected.params.instances) ? (selected.params.instances as string[]) : [];
+                    return <label key={n.id} className="inline"><input type="checkbox" checked={cur.includes(n.id)} onChange={(e) => setParam(selected.id, "instances", e.target.checked ? [...cur, n.id] : cur.filter((x) => x !== n.id), false)} />{n.label}</label>; })}</div>}
+                <div className="row">
+                  <label style={{ flex: 1 }}>Time of day (HH:MM; empty = no schedule)<input value={String(selected.params.time ?? "")} onChange={(e) => setParam(selected.id, "time", e.target.value.trim())} placeholder="19:00" /></label>
+                  <label style={{ flex: 1 }}>Days<select value={String(selected.params.days ?? "weekdays")} onChange={(e) => setParam(selected.id, "days", e.target.value, false)}>
+                    <option value="weekdays">weekdays</option><option value="daily">every day</option><option value="weekends">weekends</option></select></label>
+                </div>
+                <label>Time zone<input list="aib-tz" value={String(selected.params.tz ?? "Asia/Kolkata")} onChange={(e) => setParam(selected.id, "tz", e.target.value.trim())} />
+                  <datalist id="aib-tz">{["Asia/Kolkata", "UTC", "Europe/London", "Europe/Berlin", "America/New_York", "America/Los_Angeles", "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney"].map((z) => <option key={z} value={z} />)}</datalist></label>
+                <div className="row">
+                  <label style={{ flex: 1 }}>Memory (MB, 128 to 10240)<Num min={128} max={10240} value={Number(selected.params.memory ?? 128)} onCommit={(v) => setParam(selected.id, "memory", v)} /></label>
+                  <label style={{ flex: 1 }}>Timeout (s, 1 to 900)<Num min={1} max={900} value={Number(selected.params.timeout ?? 30)} onCommit={(v) => setParam(selected.id, "timeout", v)} /></label>
+                </div>
+                {String(selected.params.action ?? "stop") === "custom" && <label>Python code (handler(event, context) in index.py; boto3 is available)
+                  <textarea rows={10} style={{ width: "100%", boxSizing: "border-box", fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12 }} value={String(selected.params.code ?? "")} onChange={(e) => setParam(selected.id, "code", e.target.value)} placeholder={"def handler(event, context):\n    return {\"ok\": True}"} /></label>}
+                <div className="small muted">Runtime python3.12. The role may only write logs{String(selected.params.action ?? "stop") !== "custom" ? ` and ${String(selected.params.action)} the ticked instances` : ""}. Free: 1,000,000 requests a month; the schedule costs nothing.</div>
+              </>}
               {selected.kind === "s3" && <>
                 <label>Expected storage (GB, for the estimate)<Num min={0} value={Number(selected.params.gb ?? 10)} onCommit={(v) => setParam(selected.id, "gb", v)} /></label>
                 <label>Lifecycle (older objects to cheaper storage)<select value={String(selected.params.lifecycle ?? "none")} onChange={(e) => setParam(selected.id, "lifecycle", e.target.value, false)}>
@@ -409,6 +458,19 @@ function Canvas({ design, analysis, st, change, apply, toast, selectId, setSelec
                 <div className="row" style={{ alignItems: "baseline" }}>
                   <button className="small primary" onClick={() => window.dispatchEvent(new CustomEvent("aib-connect", { detail: selected.id }))}>Connect (SSH) →</button>
                   <span className="small muted">{selected.params.address ? `${selected.params.address}` : "in the Terminal tab; the address is known after Apply or an import"}</span>
+                </div>
+                {selected.params.aws_id && <div className="row" style={{ alignItems: "baseline", flexWrap: "wrap" }}>
+                  <span className="small">In AWS: <strong>{String(selected.params.state ?? "unknown")}</strong></span>
+                  <button className="small" disabled={powerBusy} onClick={() => power(selected, null)}>Refresh</button>
+                  {String(selected.params.state) === "running"
+                    ? <button className="small danger" disabled={powerBusy} onClick={() => power(selected, false)}>Stop (only the volume and address are charged then)</button>
+                    : armed === selected.id
+                      ? <button className="small primary" disabled={powerBusy} onClick={() => power(selected, true)}>Really start: USD {hourlyOf(String(selected.params.type ?? "")).toFixed(4)} an hour from now on</button>
+                      : <button className="small" disabled={powerBusy} onClick={() => setArmed(selected.id)}>Start…</button>}
+                </div>}
+                <div className="row" style={{ alignItems: "baseline" }}>
+                  <button className="small" onClick={() => schedule(selected)}>Schedule stop and start</button>
+                  <span className="small muted">two Lambda functions: stop at 19:00, start at 09:00, weekdays (free); edit them afterwards</span>
                 </div>
                 <label>Root volume (GiB, USD 0.08 per GiB a month)<Num min={8} max={16384} value={Number(selected.params.disk ?? 8)} onCommit={(v) => setParam(selected.id, "disk", v)} /></label>
                 <div>Security groups<div className="small muted">{design.nodes.filter((n) => n.kind === "sg" && n.parent === design.nodes.find((x) => x.id === selected.parent)?.parent).length === 0 && "none in this VPC yet: add one from the palette"}</div>

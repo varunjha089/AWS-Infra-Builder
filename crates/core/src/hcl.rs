@@ -60,7 +60,9 @@ pub fn generate(d: &Design) -> Files {
             m.push_str(&format!("#   - {pr}\n"));
         }
     }
-    m.push_str("\nterraform {\n  required_version = \">= 1.6\"\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 5.0\"\n    }\n  }\n}\n\n");
+    let has_lambda = d.nodes.iter().any(|n| n.kind == "lambda");
+    m.push_str(&format!("\nterraform {{\n  required_version = \">= 1.6\"\n  required_providers {{\n    aws = {{\n      source  = \"hashicorp/aws\"\n      version = \"~> 5.0\"\n    }}\n{}  }}\n}}\n\n",
+        if has_lambda { "    archive = {\n      source  = \"hashicorp/archive\"\n      version = \"~> 2.4\"\n    }\n" } else { "" }));
     m.push_str("provider \"aws\" {\n  region = var.region\n  default_tags {\n    tags = {\n      \"managed-by\" = \"aws-infra-builder\"\n      project      = var.project\n    }\n  }\n}\n");
 
     // AMIs: one data source per OS × architecture in use
@@ -221,6 +223,44 @@ pub fn generate(d: &Design) -> Files {
         v.push_str(&format!("\nvariable \"key_name\" {{\n  description = \"the name of an existing EC2 key pair in the region, for SSH\"\n  type        = string\n  default     = {}\n}}\n", q(k)));
     }
 
+    // Lambda functions: code zipped by the archive provider, a role that may only do what the function does, a schedule in the
+    // owner's time zone (EventBridge Scheduler; free)
+    for f in d.nodes.iter().filter(|n| n.kind == "lambda") {
+        let action = p(f, "action");
+        let inst: Vec<String> = f.params.get("instances").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).filter(|id| d.node(id).map(|n| n.kind == "ec2").unwrap_or(false)).map(label).collect()).unwrap_or_default();
+        let refs_id: Vec<String> = inst.iter().map(|l| format!("aws_instance.{l}.id")).collect();
+        let refs_arn: Vec<String> = inst.iter().map(|l| format!("aws_instance.{l}.arn")).collect();
+        let code = if matches!(action, "stop" | "start") {
+            format!("import os\nimport boto3\n\n\ndef handler(event, context):\n    ids = [i for i in os.environ.get(\"INSTANCE_IDS\", \"\").split(\",\") if i]\n    if not ids:\n        return {{\"{action}ed\": []}}\n    ec2 = boto3.client(\"ec2\")\n    ec2.{action}_instances(InstanceIds=ids)\n    return {{\"{action}ed\": ids}}\n")
+        } else if p(f, "code").trim().is_empty() {
+            "def handler(event, context):\n    return {\"ok\": True}\n".to_string()
+        } else {
+            p(f, "code").to_string()
+        };
+        let memory = f.params.get("memory").and_then(|v| v.as_u64()).unwrap_or(128);
+        let timeout = f.params.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
+        let runtime = if p(f, "runtime").is_empty() { "python3.12" } else { p(f, "runtime") };
+        let l = &f.label;
+        m.push_str(&format!("\n# ---- Lambda function {l} ({}; free tier)\ndata \"archive_file\" \"{l}\" {{\n  type        = \"zip\"\n  output_path = \"${{path.module}}/{l}.zip\"\n  source {{\n    filename = \"index.py\"\n    content  = <<-EOT\n{}\n    EOT\n  }}\n}}\n",
+            if matches!(action, "stop" | "start") { format!("{action}s {}", if inst.is_empty() { "nothing yet".to_string() } else { inst.join(", ") }) } else { "custom code".to_string() },
+            code.lines().map(|ln| format!("      {ln}")).collect::<Vec<_>>().join("\n")));
+        m.push_str(&format!("\nresource \"aws_iam_role\" \"{l}\" {{\n  name_prefix        = \"${{var.project}}-{l}-\"\n  assume_role_policy = jsonencode({{\n    Version = \"2012-10-17\"\n    Statement = [{{ Effect = \"Allow\", Principal = {{ Service = \"lambda.amazonaws.com\" }}, Action = \"sts:AssumeRole\" }}]\n  }})\n}}\n"));
+        let ec2_stmt = if matches!(action, "stop" | "start") {
+            format!(",\n      {{ Effect = \"Allow\", Action = [\"ec2:{}Instances\"], Resource = [{}] }}", if action == "stop" { "Stop" } else { "Start" }, if refs_arn.is_empty() { "\"*\"".to_string() } else { refs_arn.join(", ") })
+        } else { String::new() };
+        m.push_str(&format!("\nresource \"aws_iam_role_policy\" \"{l}\" {{\n  role = aws_iam_role.{l}.id\n  policy = jsonencode({{\n    Version = \"2012-10-17\"\n    Statement = [\n      {{ Effect = \"Allow\", Action = [\"logs:CreateLogGroup\", \"logs:CreateLogStream\", \"logs:PutLogEvents\"], Resource = \"arn:aws:logs:*:*:*\" }}{ec2_stmt}\n    ]\n  }})\n}}\n"));
+        m.push_str(&format!("\nresource \"aws_lambda_function\" \"{l}\" {{\n  function_name    = \"${{var.project}}-{l}\"\n  role             = aws_iam_role.{l}.arn\n  handler          = \"index.handler\"\n  runtime          = \"{runtime}\"\n  memory_size      = {memory}\n  timeout          = {timeout}\n  filename         = data.archive_file.{l}.output_path\n  source_code_hash = data.archive_file.{l}.output_base64sha256\n{}  tags = {{ Name = \"{l}\", \"design-block\" = \"{}\" }}\n}}\n",
+            if refs_id.is_empty() { String::new() } else { format!("  environment {{\n    variables = {{\n      INSTANCE_IDS = join(\",\", [{}])\n    }}\n  }}\n", refs_id.join(", ")) }, f.id));
+        let time = p(f, "time");
+        if crate::checks::valid_time(time) {
+            let (hh, mm) = time.split_once(':').unwrap();
+            let (h, mi) = (hh.parse::<u8>().unwrap_or(0), mm.parse::<u8>().unwrap_or(0));
+            let cron = match p(f, "days") { "daily" => format!("cron({mi} {h} * * ? *)"), "weekends" => format!("cron({mi} {h} ? * SAT,SUN *)"), _ => format!("cron({mi} {h} ? * MON-FRI *)") };
+            let tz = if p(f, "tz").is_empty() { "UTC" } else { p(f, "tz") };
+            m.push_str(&format!("\n# {l}: runs at {time} ({}) in {tz}\nresource \"aws_iam_role\" \"{l}_schedule\" {{\n  name_prefix        = \"${{var.project}}-{l}-sch-\"\n  assume_role_policy = jsonencode({{\n    Version = \"2012-10-17\"\n    Statement = [{{ Effect = \"Allow\", Principal = {{ Service = \"scheduler.amazonaws.com\" }}, Action = \"sts:AssumeRole\" }}]\n  }})\n}}\n\nresource \"aws_iam_role_policy\" \"{l}_schedule\" {{\n  role = aws_iam_role.{l}_schedule.id\n  policy = jsonencode({{\n    Version = \"2012-10-17\"\n    Statement = [{{ Effect = \"Allow\", Action = [\"lambda:InvokeFunction\"], Resource = aws_lambda_function.{l}.arn }}]\n  }})\n}}\n\nresource \"aws_scheduler_schedule\" \"{l}\" {{\n  name                         = \"${{var.project}}-{l}\"\n  schedule_expression          = \"{cron}\"\n  schedule_expression_timezone = \"{tz}\"\n  flexible_time_window {{\n    mode = \"OFF\"\n  }}\n  target {{\n    arn      = aws_lambda_function.{l}.arn\n    role_arn = aws_iam_role.{l}_schedule.arn\n  }}\n}}\n", p(f, "days")));
+        }
+    }
+
     // outputs
     let mut o = String::new();
     o.push_str("# outputs.tf: generated by AWS Infra Builder\n");
@@ -340,6 +380,21 @@ mod tests {
         assert!(m.contains("bucket_prefix = \"${var.project}-data-\"") && m.contains("block_public_acls       = true") && m.contains("sse_algorithm = \"AES256\""));
         assert!(m.contains("storage_class = \"STANDARD_IA\"") && m.contains("storage_class = \"GLACIER_IR\"") && m.contains("days = 365") && m.contains("status = \"Enabled\""));
         assert!(f["outputs.tf"].contains("bucket_data"));
+        // a stop schedule for the instance: the function, its narrow role, the zip and the schedule in the owner's zone
+        let d = crate::dsl::parse("net \"l\"\nregion ap-south-1\nazs 1\n\nvpc main 10.0.0.0/16\nsubnet a public 10.0.0.0/24 az a in main\nec2 box t4g.micro in a hours 176\nlambda stop_box stop box at 19:00\nlambda custom_1 at 06:15 days daily tz UTC memory 256\n", None).unwrap();
+        let f = generate(&d);
+        let main = &f["main.tf"];
+        for s in ["hashicorp/archive", "data \"archive_file\" \"stop_box\"", "ec2.stop_instances(InstanceIds=ids)", "\"ec2:StopInstances\"], Resource = [aws_instance.box.arn]", "INSTANCE_IDS = join(\",\", [aws_instance.box.id])",
+                  "schedule_expression          = \"cron(0 19 ? * MON-FRI *)\"", "schedule_expression_timezone = \"Asia/Kolkata\"", "cron(15 6 * * ? *)", "schedule_expression_timezone = \"UTC\"", "memory_size      = 256", "return {\"ok\": True}"] {
+            assert!(main.contains(s), "missing {s}\n{main}");
+        }
+        assert!(crate::dsl::print(&d).contains("lambda stop_box stop box at 19:00\n"), "{}", crate::dsl::print(&d));
+        assert!(crate::dsl::print(&d).contains("lambda custom_1 at 06:15 days daily tz UTC memory 256"));
+        let a = crate::checks::analyse(&d);
+        let box_info = a.nodes.iter().find(|n| n.id == d.by_label("box").unwrap().id).unwrap();
+        assert!(!box_info.info.iter().any(|i| i.contains("holds only if")), "scheduled: no hint. {:?}", box_info.info);
+        let c = crate::checks::analyse(&crate::dsl::parse("net \"l\"\nregion ap-south-1\nazs 1\n\nvpc main 10.0.0.0/16\nsubnet a public 10.0.0.0/24 az a in main\nec2 box t4g.micro in a hours 176\nlambda stop_all stop box\n", None).unwrap());
+        assert!(c.problems.iter().any(|p| p.contains("No schedule")), "{:?}", c.problems);
     }
 
     /// `tofu init` + `tofu validate` on every template: needs OpenTofu on PATH and the internet (the provider is downloaded once),
@@ -364,6 +419,24 @@ mod tests {
             let out = std::process::Command::new(&tofu).args(["validate", "-no-color"]).current_dir(&dir).output().unwrap();
             assert!(out.status.success(), "{}: validate failed\n{}{}", t.key, String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         }
+    }
+
+    /// the Lambda resources (archive provider, the function, the Scheduler schedule) validate too; same opt-in as above
+    #[test]
+    #[ignore]
+    fn a_lambda_schedule_validates_with_opentofu() {
+        let tofu = which("tofu").or_else(|| which("terraform")).expect("tofu or terraform on PATH");
+        let root = tempfile::tempdir().unwrap();
+        let cache = std::env::var("TF_PLUGIN_CACHE_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| root.path().join("plugin-cache"));
+        std::fs::create_dir_all(&cache).unwrap();
+        let d = crate::dsl::parse("net \"l\"\nregion ap-south-1\nazs 1\n\nvpc main 10.0.0.0/16\nigw igw in main\nsubnet a public 10.0.0.0/24 az a in main rt public\nec2 box t4g.micro in a sg g hours 176\nrt public in main: 0.0.0.0/0 -> igw\nsg g in main\nlambda stop_box stop box at 19:00\nlambda start_box start box at 09:00\nlambda hello at 06:15 days daily tz UTC\n", None).unwrap();
+        assert!(crate::checks::analyse(&d).ok, "{:?}", crate::checks::analyse(&d).problems);
+        let dir = root.path().join("lambda");
+        write_to(&generate(&d), &dir).unwrap();
+        let init = std::process::Command::new(&tofu).args(["init", "-backend=false", "-input=false", "-no-color"]).env("TF_PLUGIN_CACHE_DIR", &cache).current_dir(&dir).output().unwrap();
+        assert!(init.status.success(), "init failed\n{}{}", String::from_utf8_lossy(&init.stdout), String::from_utf8_lossy(&init.stderr));
+        let out = std::process::Command::new(&tofu).args(["validate", "-no-color"]).current_dir(&dir).output().unwrap();
+        assert!(out.status.success(), "validate failed\n{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 
     fn which(bin: &str) -> Option<std::path::PathBuf> {

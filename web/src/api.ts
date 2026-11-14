@@ -32,6 +32,7 @@ export interface Loaded { design: Design; analysis: Analysis }
 export interface Host { id: string; label: string; host: string; user: string; port: number; key: string; block: string | null; aws_id: string | null; note: string }
 export interface HostsState { saved: Host[]; suggested: Host[]; ssh: string | null }
 export interface Candidate { type: string; vcpu: number; memory: number; arch: string; gpu: boolean; hourly: number; monthly: number; note: string; fits: boolean }
+export interface InstanceState { id: string; state: string; address: string | null; private_ip: string | null }
 export interface KeyFile { path: string; name: string; kind: string }
 export interface KeyPair { name: string; kind: string; fingerprint: string; file: string | null }
 export interface TextError { line: number; message: string }
@@ -87,6 +88,8 @@ export const api = {
   termClose: (id: string) => invoke<void>("term_close", { id }),
   termList: () => invoke<string[]>("term_list"),
   keysList: () => invoke<{ dir: string; keys: KeyFile[] }>("keys_list"),
+  awsInstanceState: (ids: string[], region?: string) => invoke<InstanceState[]>("aws_instance_state", { ids, region: region ?? null }),
+  awsInstancePower: (id: string, on: boolean, region?: string) => invoke<InstanceState[]>("aws_instance_power", { id, on, region: region ?? null }),
   keyMove: (path: string) => invoke<string>("key_move", { path }),
   awsKeyPairs: (region?: string) => invoke<{ region: string; pairs: KeyPair[] }>("aws_key_pairs", { region: region ?? null }),
   awsCreateKeyPair: (name: string, region?: string) => invoke<{ name: string; path: string; region: string }>("aws_create_key_pair", { name, region: region ?? null }),

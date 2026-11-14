@@ -37,6 +37,11 @@ Apply after seeing the plan, and the Costs tab tells you beforehand what they co
   the ones found in `~/.ssh` and in the account suggested. Images: Amazon Linux 2023, Ubuntu 24.04 and 22.04, Debian 12, the
   Deep Learning AMI (PyTorch, CUDA) and Base AMI, OpenVPN Access Server; each says what it needs (x86 only, a 30 GiB root
   volume, a GPU, the VPN ports) and the checks hold you to it.
+- **Lambda functions and start/stop:** a Lambda block stops or starts the instances you tick at a time of day in your time
+  zone (weekdays, daily or weekends; EventBridge Scheduler, free tier), or runs your own Python; the generated code gets a role
+  that may do nothing else. "Schedule stop and start" on an instance adds the evening/morning pair so a box priced for working
+  hours really is off at night. The real instance behind an imported or applied block can be stopped, started and refreshed
+  from the inspector; Start asks once more and shows the hourly price.
 - **Terminal tab:** SSH into your instances from inside the app, like Termius. Every instance of the design is a host with the
   user its OS expects, the key pair's `.pem` file and its address (from the import, or from the outputs after Apply); press
   "Connect (SSH)" on an instance block, or save any other machine in the list. It runs your own `ssh` in a real terminal

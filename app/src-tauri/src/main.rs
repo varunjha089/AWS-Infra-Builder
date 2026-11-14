@@ -689,6 +689,26 @@ fn term_list(st: State<'_, App>) -> Vec<String> {
     st.terms.open_ids()
 }
 
+/// the state of the design's instances in AWS (read-only)
+#[tauri::command]
+async fn aws_instance_state(region: Option<String>, ids: Vec<String>) -> R<Vec<aws::InstanceState>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let creds = creds_for_call()?;
+    let region = region_for_call(region);
+    aws::instance_states(creds, &region, ids).await
+}
+
+/// start or stop one instance (the inspector's buttons; starting costs money and the window says so first)
+#[tauri::command]
+async fn aws_instance_power(region: Option<String>, id: String, on: bool) -> R<Vec<aws::InstanceState>> {
+    let creds = creds_for_call()?;
+    let region = region_for_call(region);
+    aws::set_instance_power(creds.clone(), &region, &id, on).await?;
+    aws::instance_states(creds, &region, vec![id]).await
+}
+
 /// the key files in ~/.ssh, by name only
 #[tauri::command]
 fn keys_list() -> Value {
@@ -795,6 +815,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &item("add-cidr", "Add Address range", None)?,
         &item("add-vpce", "Add VPC endpoint", None)?,
         &item("add-s3", "Add S3 bucket", None)?,
+        &item("add-lambda", "Add Lambda function", None)?,
         &item("add-alb", "Add Load balancer", None)?,
         &item("add-asg", "Add Auto Scaling group", None)?,
     ])?;
@@ -828,7 +849,7 @@ fn main() {
             aws_state, aws_set_keys, aws_clear_keys, aws_select, aws_test, aws_list_vpcs, aws_import,
             tofu_status, tofu_install, tofu_plan, tofu_apply, job_status, project_set_budget, design_set_aws_ids,
             hosts_state, hosts_save, key_check, key_fix, pick_file, term_open, term_write, term_resize, term_close, term_list,
-            keys_list, key_move, aws_key_pairs, aws_create_key_pair
+            keys_list, key_move, aws_key_pairs, aws_create_key_pair, aws_instance_state, aws_instance_power
         ])
         .build(tauri::generate_context!())
         .expect("error while running AWS Infra Builder")

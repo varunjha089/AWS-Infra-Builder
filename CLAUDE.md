@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Version 0.7.2 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
+Version 0.7.3 (14 November 2026): phases 0, 1, 2 and most of 3 of the roadmap in `IDEA.md` (the full design; read it before changing the
 model), plus credentials, import and costs pulled forward. Phase 3 so far: Spot instances and root volume size, the NN Builder GPU box
 template, VPC endpoints (gateway free, interface per AZ), S3 buckets (public access blocked, encryption, lifecycle), Application Load
 Balancer + Auto Scaling group with target arrows. 0.5.1: the layout goes innermost block first with every block's real size
@@ -28,7 +28,11 @@ Ubuntu 22.04, the Deep Learning AMI (PyTorch) and Base AMI, OpenVPN Access Serve
 smallest root volume and note, checked (x86-only image on Graviton = error, root volume too small = error with a Fix, DLAMI
 without a GPU = warning, OpenVPN without udp 1194 in = warning). 0.7.2: no number field clamps while typing (`Num.tsx`;
 "select all, type 200" had become 800); the ranges AWS enforces (root volume 8–16384 GiB, hours 1–744, max ≥ 1, no negative
-storage) are messages on the block instead.
+storage) are messages on the block instead. 0.7.3: Lambda functions as a block kind (stop or start instances on a schedule
+in the owner's time zone through EventBridge Scheduler, or custom Python; HCL with the archive provider, a role that may only
+do what the function does; free tier), "Schedule stop and start" on an instance adds the pair, and the real instance behind
+an imported or applied block can be stopped, started (the hourly price shown first) and refreshed from the inspector
+(ec2:Start/StopInstances: writes on the owner's click only, never in tests).
 Still to come: RDS, reachability questions, import of balancers/groups. Phase 2 = Plan & Apply with OpenTofu (found on PATH or installed into the app's folder
 from the official release, checksum-verified): plan is read-only and drawn on the canvas; apply runs only the shown plan, needs the
 project's name typed when anything is destroyed or replaced, backs up the state first, and refuses when the credentials point at
@@ -47,8 +51,9 @@ Cargo.toml                 workspace: crates/core, app/src-tauri (version in [wo
 crates/core/src/           aib-core: no UI, no AWS calls
   model.rs                 Design {name, region, azs, nodes, edges, text}; Node {id, kind, label, params, parent, x, y, w, h} (positions relative to
                            the parent); Edge {kind "attach" | "route" | "traffic" | "target", params.dest | proto + ports | port}; KINDS (vpc,
-                           subnet, igw, nat, rt, sg, ec2, cidr, vpce, s3, alb, asg) with the kind each lives in ("" = the region); REGIONS with AZ
-                           counts; PORTS by name; ENDPOINT_SERVICES (gateway | interface); ec2/asg params type, os, key, public_ip, sgs, spot, disk
+                           subnet, igw, nat, rt, sg, ec2, cidr, vpce, s3, alb, asg, lambda) with the kind each lives in ("" = the region); REGIONS with AZ
+                           counts; PORTS by name; ENDPOINT_SERVICES (gateway | interface); lambda params runtime, memory, timeout, action
+                           stop|start|custom, instances (ec2 ids), time "HH:MM" ("" = no schedule), days weekdays|daily|weekends, tz, code; ec2/asg params type, os, key, public_ip, sgs, spot, disk
                            (+ asg: tier, min, max, desired), hours (1..=744, 730 = always on; the price follows it); alb params scheme, tier, sg, port, cert, health; s3 params gb, versioning, lifecycle,
                            expire_days; vpce params service, tier, sg;
                            INSTANCE_TYPES (vCPU, GiB, arch, USD/h us-east-1 and ap-south-1; t2 and t3.nano included for imports; xlarge/2xlarge
@@ -90,7 +95,10 @@ crates/core/src/           aib-core: no UI, no AWS calls
   checks.rs                analyse(&Design) -> Analysis {nodes: NodeResult{status, messages, info, summary}, edges, problems, ok, counts, az_spread,
                            az_names, cost}. Every rule has a message that says what to change. Non-network CIDRs are errors (AWS and the provider
                            refuse them). Security: ssh/rdp/database ports open to 0.0.0.0/0 (warn), groups nobody uses or nothing reaches, rules
-                           across VPCs (error), egress "all" with arrows to a range. Instances: root volume outside 8–16384 GiB (error), hours outside 1–744 (warning, 730 used), unknown type (warning: the owner may know it; price unknown), the image's rules (x86-only image on an
+                           across VPCs (error), egress "all" with arrows to a range. Lambda: an instance it acts on gone (error), stop/start with nothing ticked (warn), no time on a stop/start (warn),
+                           bad HH:MM, memory outside 128–10240, timeout outside 1–900 (errors), the free-tier note; valid_time(). An
+                           instance priced under 730 h with no stop function ticking it gets the "Schedule stop and start" hint.
+                           Instances: root volume outside 8–16384 GiB (error), hours outside 1–744 (warning, 730 used), unknown type (warning: the owner may know it; price unknown), the image's rules (x86-only image on an
                            arm64 type = error, root volume under the image's minimum = error, Deep Learning AMI without a GPU type = warning,
                            OpenVPN without udp 1194 in = warning, the image's note as info), public IP in a private tier,
                            no group, SSH in without a key pair, the Graviton type that would save money. Tests build designs from .aib text.
@@ -99,14 +107,18 @@ crates/core/src/           aib-core: no UI, no AWS calls
                            cidr <range>, rule <from> -> <to> <proto> [ports] (an ec2/asg type only has to look like family.size; the
                            checks warn about one the table lacks); print(design) in a stable order (per VPC: igw, subnets tier-major,
                            nats, instances, route tables by the tier they serve, groups; then address ranges; then rules); sync() = ensure_labels
-                           + print into design.text; help() for the Text tab. Also: `spot`, `disk n`, `hours n` on ec2/asg (printed when not 730); `vpce <svc> in <vpc> [tier] [sg]`;
+                           + print into design.text; help() for the Text tab. Also: `spot`, `disk n`, `hours n` on ec2/asg (printed when not 730); `lambda <name> [stop|start <ec2,…>] [at HH:MM]
+                           [days …] [tz …] [memory n] [timeout n]` (the instance labels resolve like `sg`; custom code stays in the design); `vpce <svc> in <vpc> [tier] [sg]`;
                            `s3 <name> [gb] [versioning] [lifecycle] [expire]`; `alb <name> internet|internal in <vpc> [tier] [sg] [port] [cert]
                            [health]`; `asg <name> <type> in <vpc> [tier] [min] [max] [desired] [sg] …`; `target <alb> -> <asg|ec2> <port>`. Only an
                            `rt` line has routes after `:` (ARNs hold colons).
   hcl.rs                   generate(&Design) -> Files {main.tf, variables.tf, outputs.tf} for the AWS provider 5: aws_vpc, aws_subnet,
                            aws_internet_gateway, aws_eip + aws_nat_gateway, aws_route_table/route/association, aws_security_group + one
                            aws_vpc_security_group_ingress_rule per arrow in (and egress rules, or the allow-all written down), data aws_ami per
-                           OS × arch, aws_instance (gp3 root, IMDSv2); tags Name, design-block (+ managed-by/project via default_tags); a design
+                           OS × arch, aws_instance (gp3 root, IMDSv2); per lambda: data archive_file (the Python inline; stop/start code reads
+                           INSTANCE_IDS from the environment), aws_iam_role + policy (logs, and ec2:Stop/StartInstances on the ticked
+                           instances' ARNs only), aws_lambda_function, and when a time is set an aws_scheduler_schedule in the block's time
+                           zone with its own invoke role (required_providers gains hashicorp/archive only when a lambda exists); tags Name, design-block (+ managed-by/project via default_tags); a design
                            with errors gets them as a header. write_to(dir). Test `every_template_validates_with_opentofu` is #[ignore]
                            (needs tofu + the internet): `cargo test -p aib-core -- --ignored`; examples/dump_hcl.rs writes the templates for CI.
   templates.rs             TEMPLATES as .aib text (single_public, web_server, two_tier, three_tier, broken); build(key). The test checks
@@ -151,7 +163,8 @@ app/src-tauri/src/tofu.rs  OpenTofu: locate() (settings tofu_path, <home>/bin/to
                            Credentials only in the child's environment (AWS_PROFILE, or the three key variables). One `#[ignore]` real
                            test plans the web_server template read-only (12 to add) with the default profile.
 app/src-tauri/src/aws.rs   the AWS SDK for Rust (aws-config, aws-sdk-sts, aws-sdk-ec2): Creds {Profile | Keys}, identity(), list_vpcs(), key_pairs(),
-                           create_key_pair() (the one write outside Apply: a key pair is free),
+                           create_key_pair() (free), instance_states() (read-only), set_instance_power(id, on) (Start/StopInstances: the writes
+                           outside Apply, on the owner's click only, never in tests),
                            inventory() (VPC, subnets, IGWs, NATs, route tables, security groups, instances, AMI names) with a 60 s timeout
                            and readable errors. Only Describe* and GetCallerIdentity. One real test (`#[ignore]`, AWS_INFRA_BUILDER_REAL=1 with
                            the default profile) prints the account's first VPC as .aib.
@@ -161,6 +174,7 @@ app/src-tauri/src/main.rs  Tauri 2 commands (app_state, project_*, project_load,
                            project.json "aws".account set by the first plan, region guard, budget guard), job_status(since),
                            project_set_budget, design_set_aws_ids (the created ids onto the blocks, and from the outputs the instances'
                            public/private addresses); hosts_state(design) {saved, suggested, ssh path}, hosts_save, key_check, key_fix,
+                           aws_instance_state(ids), aws_instance_power(id, on) (then the fresh state and addresses),
                            pick_file, term_open(id, host, cols, rows) (hosts::check + key_problem first; returns the ssh arguments),
                            term_write, term_resize, term_close, term_list, keys_list, key_move, aws_key_pairs (DescribeKeyPairs +
                            whether ~/.ssh/<name>.pem exists), aws_create_key_pair(name) (CreateKeyPair ed25519 pem -> write_new_key);
@@ -178,7 +192,10 @@ web/src/                   React 19 + React Flow 12 (Vite, TypeScript)
                            button each -> design_tidy, then the layout again), the problems and "Fixes" (Analysis.fixes, a Fix button
                            each and "Fix all safe ones" -> design_fix); a selected block or arrow shows its own fixes under its problems. Arrange (button, ⇧⌘A through the
                            "aib-arrange" event) sends the measured block sizes (rf.getNodes().measured). An instance block has
-                           "Connect (SSH)" -> the "aib-connect" event -> the Terminal tab. Colours: COLORS by day,
+                           "Connect (SSH)" -> the "aib-connect" event -> the Terminal tab; with an aws_id: "In AWS: <state>", Refresh,
+                           Stop, and Start… that asks once more with the hourly price (power()); "Schedule stop and start" adds the two
+                           lambda blocks stop_<label> 19:00 and start_<label> 09:00 (schedule()). The lambda inspector: action, instance
+                           ticks, time, days, time zone (datalist), memory, timeout, the code textarea for custom. Colours: COLORS by day,
                            neon(COLORS) at night through --c (useColor)
   Num.tsx                  the number field every inspector number uses: it keeps the typed text and stores it whenever it is a number,
                            never clamping (a clamp on each keystroke turned "2" into the minimum 8 and "200" into 800); ranges are the
